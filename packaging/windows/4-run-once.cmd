@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title 番剧自动下载 - 执行一次
 
 if not exist "config.json" (
-  echo 还没有 config.json，请先双击「1 首次配置.cmd」。
+  echo 还没有 config.json，请先双击 1-setup.cmd。
   pause
   exit /b 1
 )

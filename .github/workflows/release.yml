@@ -92,19 +92,25 @@ jobs:
           $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
           $zip = "bangumi-downloader-$tag-windows-x64.zip"
 
-          # 必须用 tar（bsdtar）而不是 Compress-Archive：
-          # Compress-Archive 会用系统 OEM 代码页写文件名，包里那些中文 .cmd
-          # 解压出来会变成乱码（实测 "1 首次配置.cmd" 会变成 "1 ??????.cmd"）。
-          # bsdtar 默认以 UTF-8 写入并设置 UTF-8 标志位，Windows 资源管理器、
-          # 7-Zip、WinRAR 都能正确还原中文名。
-          Push-Location release/windows
-          try {
-            tar.exe -a -c -f "../../$zip" *
-            if ($LASTEXITCODE -ne 0) { throw "tar 打包失败，退出码 $LASTEXITCODE" }
-          } finally {
-            Pop-Location
-          }
+          # 包内所有文件名都是纯 ASCII（脚本一律用 1-setup.cmd 这类名字，
+          # 中文说明放在文件内容里）。这一点是刻意的：Compress-Archive 和
+          # Windows 自带的 bsdtar 都会按系统 OEM 代码页写文件名，
+          # 中文名在 zip 里会变成乱码且无法还原。用 ASCII 名后两者都安全。
+          Compress-Archive -Path "release/windows/*" -DestinationPath $zip -Force
           if (-not (Test-Path $zip)) { throw "没有生成 $zip" }
+
+          # 校验包里确实没有非 ASCII 文件名，避免以后改名时不知不觉踩回坑里
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
+          try {
+            $bad = $archive.Entries | Where-Object { $_.FullName -match '[^\x20-\x7E]' }
+            if ($bad) {
+              throw "zip 里存在非 ASCII 文件名，会在解压时乱码：$($bad.FullName -join ', ')"
+            }
+            Write-Host "包内文件名检查通过（$($archive.Entries.Count) 个条目全为 ASCII）"
+          } finally {
+            $archive.Dispose()
+          }
 
           Get-FileHash $zip -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |

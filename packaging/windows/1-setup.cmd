@@ -34,6 +34,6 @@ echo  改完保存关闭记事本即可。
 echo ============================================================
 echo.
 start "" notepad "config.json"
-echo 保存好之后，双击「2 检查配置.cmd」验证是否连通。
+echo 保存好之后，双击 2-check.cmd 验证是否连通。
 echo.
 pause

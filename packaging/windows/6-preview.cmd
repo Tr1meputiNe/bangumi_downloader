@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title 番剧自动下载 - 执行一次
+title 番剧自动下载 - 预览这次会下载什么
 
 if not exist "config.json" (
-  echo 还没有 config.json，请先双击「1 首次配置.cmd」。
+  echo 还没有 config.json，请先双击 1-setup.cmd。
   pause
   exit /b 1
 )
@@ -15,6 +15,6 @@ echo.
 echo.
 echo ------------------------------------------------------------
 echo 以上是「如果现在下载会选哪些种子」。确认没问题后，
-echo 双击「3 启动.cmd」开始真正下载，或用「4 执行一次.cmd」跑一轮真实下载。
+echo 双击 3-start.cmd 开始真正下载，或用 4-run-once.cmd 跑一轮真实下载。
 echo ------------------------------------------------------------
 pause
