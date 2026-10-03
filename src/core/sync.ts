@@ -1,9 +1,10 @@
 import type { AppConfig } from '../config.js';
 import type { AnimeGap, PlannerClient } from '../planner/client.js';
 import { displayName } from '../planner/client.js';
-import { pickRelease, type ScoredCandidate, type SearchResult, type TargetEpisode } from '../anime/rank.js';
+import { type ScoredCandidate, type TargetEpisode } from '../anime/rank.js';
 import { matchesEpisode, parseReleaseName } from '../anime/parse.js';
 import { searchAll } from '../trackers/index.js';
+import { searchAndRank } from './search.js';
 import type { QbittorrentClient } from '../qbittorrent/client.js';
 import { FilePriority } from '../qbittorrent/client.js';
 import type { StateStore } from '../state/store.js';
@@ -211,9 +212,19 @@ export async function runSync(deps: SyncDeps, mode: DownloadMode): Promise<SyncR
       .filter((item): item is TargetEpisode => Boolean(item));
 
     log.info(`《${name}》缺 ${pending.length} 集，本轮处理 第${batchEpisodes.join('/')}集`);
-    const results = await search({ queries: gap.queries, config: config.trackers });
+    // 走与手动搜索共用的那一条「搜索 + 打分」代码路径，
+    // 区别只在 mode: 自动化会按集号做硬性淘汰。
+    const { ranked } = await searchAndRank({
+      query: gap.queries[0] ?? name,
+      altQuery: gap.queries[1] ?? gap.queries[0] ?? name,
+      config,
+      mode: 'automation',
+      targets: batchTargets,
+      targetSeason: gap.season,
+      search
+    });
 
-    if (results.length === 0) {
+    if (ranked.length === 0) {
       for (const episode of batchEpisodes) {
         plan.decisions.push({ episode, outcome: 'no-release', detail: '所有片源都没有搜到结果' });
         report.stats.noRelease += 1;
@@ -223,7 +234,7 @@ export async function runSync(deps: SyncDeps, mode: DownloadMode): Promise<SyncR
     }
 
     for (const episode of batchEpisodes) {
-      const choice = chooseForEpisode(episode, batchTargets, results, gap, config);
+      const choice = chooseForEpisode(episode, ranked);
       if (!choice) {
         plan.decisions.push({ episode, outcome: 'no-release', detail: '没有找到覆盖该集且符合偏好的发布' });
         report.stats.noRelease += 1;
@@ -292,24 +303,17 @@ export async function runSync(deps: SyncDeps, mode: DownloadMode): Promise<SyncR
 }
 
 /**
- * 为单集挑发布。把整批目标集一起传进去，这样覆盖了本批多集的合集
- * 能拿到额外加分并被合并推送。
+ * 为单集从已排好序的候选里挑一个发布。
+ *
+ * 候选由 searchAndRank 用整批目标集打分，所以覆盖了本批多集的合集
+ * 会拿到额外加分；这里只需再确认它真的覆盖当前这一集。
  */
-function chooseForEpisode(
-  episode: number,
-  batchTargets: TargetEpisode[],
-  results: readonly SearchResult[],
-  gap: AnimeGap,
-  config: AppConfig
-): ScoredCandidate | null {
-  const { candidate } = pickRelease(results, {
-    preference: config.preference,
-    targets: batchTargets,
-    targetSeason: gap.season
-  });
-  if (!candidate) return null;
-  if (!matchesEpisode(candidate.parsed, episode)) return null;
-  return candidate;
+function chooseForEpisode(episode: number, ranked: readonly ScoredCandidate[]): ScoredCandidate | null {
+  for (const item of ranked) {
+    if (item.rejected) continue;
+    if (matchesEpisode(item.parsed, episode)) return item;
+  }
+  return null;
 }
 
 function logChoice(plan: TorrentPlan): void {

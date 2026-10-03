@@ -1,8 +1,8 @@
 {
   "name": "bangumi-downloader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "从本地 Bangumi Watch Planner 抓取追番进度，自动搜种并推送到 qBittorrent",
+  "description": "番剧资源搜索 + 自动追番，从 animes.garden/mikan/nyaa 搜种并推送到 qBittorrent",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -15,17 +15,21 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint .",
-    "build": "node scripts/build-exe.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "build": "node scripts/build-client.mjs && node scripts/build-exe.mjs",
+    "build:exe": "node scripts/build-exe.mjs",
+    "serve": "tsx src/bin.ts serve",
     "build:portable": "node scripts/build-portable.mjs"
   },
-  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
     "esbuild": "^0.28.1",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
+    "htm": "^3.1.1",
     "postject": "^1.0.0-alpha.6",
+    "preact": "^11.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.48.1",

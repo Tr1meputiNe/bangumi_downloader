@@ -93,6 +93,16 @@ export type NotifyConfig = {
   };
 };
 
+export type WebConfig = {
+  /** Web 界面监听端口。刻意避开 Planner 的 3777。 */
+  port: number;
+  host: string;
+  /** 启动 serve 时自动打开浏览器。 */
+  openBrowser?: boolean;
+  /** 单次搜索每个源最多取多少条（越大越慢）。 */
+  maxResultsPerTracker?: number;
+};
+
 export type AppConfig = {
   /** 本机 Bangumi Watch Planner 地址。 */
   plannerBaseUrl: string;
@@ -108,6 +118,7 @@ export type AppConfig = {
   trackers: TrackerConfig;
   state: StateConfig;
   notify: NotifyConfig;
+  web: WebConfig;
   /** 日志级别。 */
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
 };
@@ -170,6 +181,12 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
   },
   notify: {
     console: true
+  },
+  web: {
+    port: 3778,
+    host: '127.0.0.1',
+    openBrowser: true,
+    maxResultsPerTracker: 60
   },
   logLevel: 'info'
 };

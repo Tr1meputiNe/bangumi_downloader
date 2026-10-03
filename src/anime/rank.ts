@@ -95,6 +95,15 @@ export type ScoreContext = {
   targets: TargetEpisode[];
   /** 目标番剧的季度号，用于排除明确写了别的季度的发布。 */
   targetSeason: number | null;
+  /**
+   * 是否要求集号覆盖目标集。
+   *
+   * 自动化必须为 true：下错集是硬伤。
+   * 手动搜索为 false：用户搜「葬送的芙莉莲」是想看全部资源，
+   * 如果按「第 1 集」做硬性淘汰，几十条结果里只会剩下一两条，没法挑。
+   * 关掉之后集号仍然会被解析和展示，只是不再作为淘汰依据。
+   */
+  matchesEpisode?: boolean;
 };
 
 /**
@@ -133,7 +142,8 @@ export function scoreCandidate(result: SearchResult, context: ScoreContext): Sco
     .map((target) => target.episode)
     .filter((episode) => matchesEpisode(parsed, episode));
 
-  if (coversEpisodes.length === 0) {
+  // 只有自动化模式才把「集号不覆盖」当作淘汰条件
+  if (context.matchesEpisode !== false && coversEpisodes.length === 0) {
     reject(parsed.kind === 'unknown' ? '无法识别集号' : `集号不覆盖 第${context.targets.map((t) => t.episode).join('/')}集`);
   }
 

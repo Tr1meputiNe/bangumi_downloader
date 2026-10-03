@@ -1,20 +1,38 @@
 <p align="center">
   <strong>bangumi-downloader</strong><br>
-  从本机 Bangumi Watch Planner 读取追番进度，自动搜种并推送到 qBittorrent
+  番剧资源搜索 + 自动追番，统一推送到 qBittorrent
 </p>
 
-把今天要追的新番自动收进 qBittorrent，不用再手动去各个站点找种子。
+一个工具，两种用法，共用同一套片源与挑选规则：
 
-它读取你本机 **Bangumi Watch Planner**（默认 `http://127.0.0.1:3777`）里的追番数据，
-找出「在看」的番剧里**还没看、但已经播出**的集数，去片源站搜索对应发布，
-按你的偏好（默认 **MKV + 1080p + 简体中文**）打分挑一个最优的，
-然后把磁力链接推给本机 qBittorrent 开始下载。
+**① 手动搜索**（Web 界面）—— 想看什么自己搜，挑完再下
 
-- **只看你的追番列表**：以 Watch Planner 的数据为准，不受其它订阅源干扰
-- **不会下到没播的集**：播出日期晚于今天的集数会被跳过
-- **不会重复下载**：按 infohash + 集号记账，推过的不会再推
+```bash
+bangumi-downloader serve        # 打开 http://127.0.0.1:3778/
+```
+
+在网页里输入番剧名，结果会从 **animes.garden、mikan、nyaa** 三个站并行抓取并按偏好排序，
+每条都标出**集号、分辨率、容器、字幕语言、字幕组、体积、做种数**，
+勾选后一键推送到 qBittorrent。
+
+**② 自动追番**（常驻）—— 新番更新后自动收
+
+```bash
+bangumi-downloader run          # 每 30 分钟检查一次
+```
+
+读取你本机 **Bangumi Watch Planner**（默认 `http://127.0.0.1:3777`）里的追番数据，
+找出「在看」的番剧里**还没看、但已经播出**的集数，搜种、打分、自动推送。
+
+两者共享的挑选逻辑：
+
+- **按偏好打分**：默认 **MKV + 1080p + 简体中文**，权重、字幕组白/黑名单全部可配置
+- **自动排除干扰项**：预告、PV、NCOP/NCED、菜单、字体包不会进候选
 - **不会为了两集下整个合集**：只缺一两集但只找到合集时，会解析种子文件清单，只勾选需要的那几集
+- **跨源去重**：同一发布被多个站收录时按 infohash 合并成一条
 - **单文件 exe，零依赖**：Windows 上解压双击即用，不需要装 Node.js、Python 或 Docker
+
+自动追番还额外保证：**不会下到没播的集**、**不会重复下载**（按 infohash + 集号记账）。
 
 ---
 
@@ -33,31 +51,36 @@
 
 ## 工作原理
 
+两个入口，一条流水线：
+
 ```
-┌──────────────────────┐
-│ Bangumi Watch Planner│  读取 /api/dashboard、/api/subjects/:id/episodes
-│ 127.0.0.1:3777       │  → 「在看」且未看、且已播出的集号
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  片源搜索（三路并行）  │  animes.garden（聚合 dmhy）
-│                      │  mikan 官方 RSS
-│                      │  nyaa（nyaa.land → nyaa.si 自动回退）
-└──────────┬───────────┘
-           │  按 infohash 去重合并
-           ▼
-┌──────────────────────┐
-│  打分挑选             │  容器 MKV > MP4；1080p > 2160p > 720p
-│                      │  简中 > 繁中；字幕组白/黑名单；做种数
-│                      │  排除预告/PV/NCOP 等非正片
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  qBittorrent WebUI   │  磁力直推；合集则解析 .torrent 只勾选需要的分集
-└──────────────────────┘
+① 手动搜索：Web 界面输入关键词
+② 自动追番：Bangumi Watch Planner（127.0.0.1:3777）的「在看 + 未看 + 已播出」集数
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  片源搜索（三路并行，按 infohash 去重） │
+        │  animes.garden（聚合 dmhy/mikan/萌番组）│
+        │  mikan 官方 RSS                      │
+        │  nyaa（nyaa.land → nyaa.si 自动回退） │
+        └────────────────┬────────────────────┘
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  发布名解析 + 偏好打分                 │
+        │  集号 / 季度 / 合集区间 / 分辨率 / 容器 │
+        │  字幕语言 / 字幕组 / 做种数            │
+        └────────────────┬────────────────────┘
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  qBittorrent WebUI                  │
+        │  磁力直推；合集只勾选需要的分集        │
+        └─────────────────────────────────────┘
 ```
+
+两个入口共用 `src/core/search.ts` 这同一条「搜索 + 打分」代码路径，
+区别只有一点：**自动追番会按集号做硬性淘汰**（下错集是硬伤），
+**手动搜索不做**（否则搜「葬送的芙莉莲」会因为目标是第 1 集而淘汰掉绝大多数结果）。
+所以两边不会出现「打分规则不一致」的问题。
 
 ### 为什么 dmhy 走 animes.garden
 
@@ -70,11 +93,12 @@
 通过磁力链接添加种子时，qBittorrent 在取到元数据之前并不知道里面有哪些文件，
 因此没法在添加的瞬间说「只下第 3 集」。如果不管这一点，
 一个 50 GB 的季度合集会被整个拉下来，而你只缺一集。
-所以当程序选中的是合集、且目标只是其中少数几集时（体积大于 4 GB），
+所以当程序选中的是合集、且目标只是其中少数几集时，
 它会自己下载一份 `.torrent`，解析出文件清单，挑出目标分集，
 再把种子内容直接交给 qBittorrent，这样选择性下载才能生效。
 
----
+手动的 Web 搜索也会走同一套逻辑：如果你在一个合集上点了下载，
+程序会尽量只拉你勾中的那几集。
 
 ## Windows 使用
 
@@ -135,6 +159,37 @@
 
 觉得挑得不对，就回去改 [挑选规则](#挑选规则) 里的偏好。
 
+### 6. 开始使用
+
+**手动搜索（日常推荐）**
+
+双击 `3-search.cmd`，浏览器会自动打开 `http://127.0.0.1:3778/`。
+
+在搜索框里输入番剧名，例如「葬送的芙莉莲」。结果会从三个片源并行抓取，
+去掉重复后按偏好排序。每一条都标了集号、分辨率、容器、字幕语言、字幕组、体积和做种数，
+最右边是偏好得分（鼠标悬停可以看到得分构成）。
+
+用法要点：
+
+- **点整行**即可勾选，可以多选，底部会汇总已选数量和总体积
+- **筛选**：顶部可以按片源过滤，或勾「只看符合偏好」把不符合的折叠掉
+- 不合偏好的结果不会消失，只会被标注出来（例如「✕ 命中排除词 pv」），
+  这样你能看到「为什么没选它」，也仍然可以强行下载
+- 勾完点右下角**推送到 qBittorrent**，程序会连同分类和标签一起推过去
+- 如果选中的是合集，程序会尽量只下载你需要的分集（见上文说明）
+- 同一个关键词 5 分钟内重复搜索会直接走缓存，不再重复请求片源站
+
+关掉那个命令行窗口就会停止网页服务（已经开始的下载不受影响）。
+
+**自动追番**
+
+- `4-auto.cmd` —— 常驻运行，每 30 分钟检查一次 Watch Planner 里的追番进度
+- `7-run-once.cmd` —— 只跑一轮，适合配合 Windows 任务计划程序
+- `5-install-startup.cmd` —— 开机自动在后台跑自动追番；用 `uninstall-startup.cmd` 取消
+
+> 首次运行某个新番时，片源站可能还没出种（例如刚播完几分钟），
+> 这种情况会被记成「无片源」并在下一轮自动重试，属于正常现象。
+
 ### 文件说明
 
 压缩包里的脚本都用 ASCII 文件名（中文名在 zip 里容易变成乱码），双击后窗口标题会显示中文用途：
@@ -143,23 +198,12 @@
 | --- | --- |
 | `1-setup.cmd` | 首次配置：生成 `config.json` 并用记事本打开 |
 | `2-check.cmd` | 检查 Watch Planner、片源、qBittorrent 的连通性 |
-| `3-start.cmd` | 常驻运行，每 30 分钟检查一次 |
-| `4-run-once.cmd` | 只执行一轮真实下载 |
-| `5-install-startup.cmd` | 注册开机自启 |
-| `6-preview.cmd` | 预览这次会下载哪些集（不推送） |
+| `3-search.cmd` | **启动资源搜索界面**（推荐日常用这个） |
+| `4-auto.cmd` | 自动追番，常驻运行每 30 分钟一轮 |
+| `5-install-startup.cmd` | 注册开机自启（自动追番） |
+| `6-preview.cmd` | 预览：自动追番会挑什么，或搜索某个关键词 |
+| `7-run-once.cmd` | 自动追番只执行一轮 |
 | `uninstall-startup.cmd` | 取消开机自启并结束后台进程 |
-
-### 6. 开始下载
-
-- **`3-start.cmd`** —— 常驻运行，每 30 分钟检查一次。**关掉窗口就停止**（qBittorrent 里已开始的下载不受影响）。
-- **`4-run-once.cmd`** —— 只跑一轮就退出，适合配合 Windows 任务计划程序。
-- **`5-install-startup.cmd`** —— 注册一个登录时自动启动的计划任务，开机后自动在后台跑。
-  用 **`uninstall-startup.cmd`** 取消。
-
-> 首次运行某个新番时，片源站可能还没出种（例如刚播完几分钟），
-> 这种情况会被记成「无片源」并在下一轮自动重试，属于正常现象。
-
----
 
 ## 配置说明
 
@@ -187,12 +231,16 @@
 | `trackers.nyaaHosts` | `["https://nyaa.land","https://nyaa.si"]` | 按顺序尝试，第一个可用的会被记住 |
 | `trackers.maxResultsPerTracker` | `60` | 每个源每个关键词最多取多少条 |
 | `state.file` | `./data/state.json` | 已推送记录，用于跨轮去重 |
+| `web.port` | `3778` | 资源搜索界面的端口（刻意避开 Planner 的 3777） |
+| `web.host` | `127.0.0.1` | 监听地址。**改成 `0.0.0.0` 等于把下载接口开放给局域网，请自行评估风险** |
+| `web.openBrowser` | `true` | 启动 `serve` 时自动打开浏览器 |
 | `notify.serverChanKey` | 无 | 填了就在有新增下载时推 Server 酱 |
 | `notify.telegram` | 无 | 填了就在有新增下载时推 Telegram |
 
 ### 想「先攒着不自动下」
 
-把 `download.enabled` 设成 `false`，程序就只搜索和打印，不会碰 qBittorrent。
+把 `download.enabled` 设成 `false`，自动追番就只搜索和打印，不会碰 qBittorrent。
+注意这也会让 Web 界面只能搜索、不能下载（界面右上角会显示「qBittorrent 未连接」）。
 
 ### 想只追最近的新番、不补历史
 
@@ -214,7 +262,9 @@
 
 - 命中 `preference.excludeKeywords`（默认排除 `预告`、`pv`、`cm`、`menu`、`ncop`、`nced`、`sample`）
 - 缺少 `preference.requireKeywords` 里的任一关键词（默认空，即不限制）
-- 集号不覆盖目标集（合集只要区间覆盖就算覆盖）
+- 集号不覆盖目标集（合集只要区间覆盖就算覆盖）。
+  **这一条只对自动追番生效**；手动搜索不按集号淘汰，否则搜「葬送的芙莉莲」
+  会因为目标是第 1 集而把其余几十条全滤掉
 - 发布名明确写了**别的季度**（例如目标是第 2 季，而发布写着 `S01`）。
   没写季度的一律放行 —— 很多字幕组不标季度
 
@@ -282,28 +332,41 @@ bangumi-downloader <命令> [选项]
 
 | 命令 | 作用 |
 | --- | --- |
-| `sync` | 执行一轮完整流程 |
-| `run` | 守护模式，按 `intervalMinutes` 定时执行 |
+| `serve` | **启动 Web 搜索界面**（手动搜索 + 挑选下载） |
+| `search` | 命令行搜索并打印候选排名，不下载 |
+| `sync` | 自动追番：执行一轮完整流程 |
+| `run` | 自动追番：守护模式，按 `intervalMinutes` 定时执行 |
 | `check` | 检查配置、Watch Planner、三个片源、qBittorrent 的连通性 |
-| `preview` | 只搜索并打印候选排名，不下载（排错用） |
+| `preview` | 查看「自动追番」在某个关键词上会怎么选（按集号严格淘汰） |
 | `config` | 打印当前生效的完整配置 |
+
+`search` 与 `preview` 的区别：`search` 是给你自己看的（不做集号淘汰，列出全部资源），
+`preview` 是给排错用的（模拟自动追番的严格匹配）。
 
 | 选项 | 说明 |
 | --- | --- |
 | `--config <路径>` | 指定配置文件，默认 `./config.json` |
+| `--query <关键词>` | `search` / `preview` 用哪个关键词搜索 |
+| `--port <端口>` | 覆盖 Web 界面端口 |
+| `--no-open` | 启动 Web 界面时不自动打开浏览器 |
 | `--dry-run` | 只挑选并打印，不推送、不写状态 |
-| `--query <关键词>` | `preview` 用哪个关键词搜索 |
 | `--verbose` | 输出 debug 日志（含每个源的请求细节和淘汰原因） |
 
 ```bash
-# 看看某部番现在会挑哪一版
+# 启动搜索界面（日常最常用）
+bangumi-downloader serve
+
+# 命令行搜索，看看有哪些资源
+bangumi-downloader search --query "冰之城墙"
+
+# 看看自动追番会挑哪一版
 bangumi-downloader preview --query "葬送的芙莉莲"
 
-# 完整跑一轮但不下载
+# 完整跑一轮自动追番但不下载
 bangumi-downloader sync --dry-run
 
 # 排查为什么没选到想要的版本
-bangumi-downloader preview --query "冰之城墙" --verbose
+bangumi-downloader search --query "冰之城墙" --verbose
 ```
 
 ---
@@ -331,6 +394,33 @@ bangumi-downloader preview --query "冰之城墙" --verbose
 4. 关键词是否匹配不上？程序会用中文名和原名分别搜索。
    如果两边都对不上（片源站用的是第三种译名），把该译名加进
    `preference.requireKeywords` 是没用的 —— 应当直接用 `preview` 确认片源站的实际标题格式。
+
+**Q：双击 3-search.cmd 后浏览器显示「无法访问此网站」**
+
+看命令行窗口里的错误。常见原因：
+
+- 端口被占用 —— 改 `config.json` 里的 `web.port`
+- 杀毒软件/防火墙拦了本地端口 —— 放行 `bangumi-downloader.exe`
+- 窗口一闪就关了 —— 说明启动即报错，在命令行里手动运行
+  `bangumi-downloader.exe serve` 可以看到完整报错
+
+**Q：Web 界面能搜索，但点下载没反应 / 提示未连接**
+
+右上角显示「qBittorrent 未连接」说明 WebUI 连不上。
+界面仍然可以用来搜索和查看，但下载会失败。请检查 qBittorrent 是否在运行、
+`config.json` 里的 `qbittorrent.url` 端口和账号密码是否正确。
+
+**Q：搜索结果里有些条目被标了「✕」**
+
+那是被偏好规则淘汰的（例如命中了排除词 `pv`、或者季度对不上）。
+手动搜索**不会**把它们藏起来 —— 让你能看见「为什么没选它」，
+也仍然可以强行勾选下载。想只看符合偏好的，勾上顶部「只看符合偏好」。
+
+**Q：搜索结果里的集号为什么有的是「集号未知」**
+
+发布名里确实没写集号，通常是整季合集（标题只写「合集」）或者字幕组的特殊命名。
+这类条目仍然可以下载，只是程序无法帮你判断它包含哪些集，
+所以下载时不会做分集选择，会整包拉下来 —— 勾选前留意一下体积。
 
 **Q：qBittorrent 登录失败**
 
@@ -421,26 +511,40 @@ mikan 和 nyaa 走官方接口，三者合并去重。
 ```
 src/
   bin.ts               可执行入口
-  index.ts             CLI 命令分发
+  index.ts             CLI 命令分发（serve / search / sync / run / check / preview）
   config.ts            配置类型、默认值与合并逻辑
   planner/client.ts    Watch Planner API 客户端、未看集数计算
   anime/parse.ts       发布名解析（集号/季度/合集/分辨率/容器/字幕）
   anime/rank.ts        硬性淘汰 + 加权打分选种
   trackers/            animes.garden、mikan、nyaa 三个片源
+  core/search.ts       共用的「搜索 + 打分」路径（Web 与自动追番都走这里）
+  core/push.ts         共用的「推送到 qBittorrent」路径（含合集分集选择）
+  core/sync.ts         自动追番的编排
   qbittorrent/client.ts  qBittorrent WebUI API 客户端
-  core/sync.ts         主流程编排
-  state/store.ts       已推送记录（跨轮去重）
+  web/server.ts        Web 界面服务端（只用 node:http，无 Web 框架）
+  web/serialize.ts     后端类型 → 前端类型的转换层
+  web/client/          前端源码（preact + htm，无 JSX、无构建框架）
+  web/generated/       前端构建产物（默认导出字符串的模块，会被内联进 exe）
+  state/store.ts       已推送记录（跨轮去重，仅自动追番使用）
   notify/              Server 酱 / Telegram 通知
-  util/                bencode、种子解析、磁力、文本、日志
-tests/                 单元测试
+  util/                bencode、种子解析、磁力、缓存、文本、日志
+tests/                 单元测试（含 mock qBittorrent 的整链路集成测试）
 packaging/windows/     Windows 中文启动脚本
-scripts/               打包脚本
+scripts/               打包脚本（build-client / build-exe / build-portable）
 ```
 
-依赖全部是 Node 内置模块，`dependencies` 为空 —— 这也是能做到单文件 exe 的前提。
-唯一的外部包（esbuild、postject、vitest、eslint、typescript）都只在构建期使用。
+`dependencies` 为空 —— 运行时只用 Node 内置模块，这是能做到单文件 exe 的前提。
+前端用的 preact + htm 都打进 bundle，目标机器不需要任何额外东西。
+外部包（esbuild、postject、vitest、eslint、typescript、preact、htm）只在构建期使用。
 
----
+### 前端是怎么嵌进 exe 的
+
+1. `scripts/build-client.mjs` 用 esbuild 把 `src/web/client/` 打成一个 IIFE bundle
+2. 产出的 JS/CSS 写成 `src/web/generated/client-bundle.ts`（一个默认导出字符串的模块）
+3. `scripts/build-exe.mjs` 打包服务端时，esbuild 把这两个模块直接内联进 bundle
+4. 运行时 `src/web/server.ts` 把 CSS 和 JS 内联进 HTML 返回
+
+所以 exe 里没有任何外部静态资源文件，运行目录只需要 `config.json`。
 
 ## 许可
 

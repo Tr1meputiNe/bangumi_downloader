@@ -6,7 +6,7 @@
  * 目标机器连 Node.js 都不用装。
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -58,6 +58,18 @@ const result = await build({
   // 带 shebang 会让 embedderRunCjs 直接抛 SyntaxError。
   metafile: true
 });
+
+// 前端如果没构建，exe 里的页面只会显示一句提示。
+// 主动检查一下，避免打出一个界面不可用的包。
+const webBundlePath = join(root, 'src', 'web', 'generated', 'client-bundle.ts');
+const webBundle = readFileSync(webBundlePath, 'utf8');
+if (webBundle.includes('__CLIENT_NOT_BUILT__')) {
+  console.error(
+    '\n错误：前端资源尚未构建（src/web/generated/client-bundle.ts 还是占位内容）。' +
+      '\n请先运行 npm run build:client，或直接运行 npm run build（它会先构建前端）。\n'
+  );
+  process.exit(1);
+}
 
 const bundledBytes = Object.values(result.metafile.outputs)[0]?.bytes ?? 0;
 console.log(`打包完成：${(bundledBytes / 1024).toFixed(1)} KB`);
@@ -115,11 +127,73 @@ if (process.platform === 'win32') {
   normalizeLineEndings(releaseDir);
 }
 
+// 无论在哪个平台构建都校验一次 Windows 脚本。
+// 这些是跨平台的文本资源，错误应该在本机就暴露，而不是等用户双击才发现
+// —— uninstall-startup.cmd 装错内容那件事就是这么溜进发行包的。
+verifyPackaging(join(root, 'packaging', 'windows'));
+
 console.log(`产物目录：${releaseDir}`);
 console.log(`可执行文件：${executablePath}`);
 
 function run(command, args, cwd = root) {
   execFileSync(command, args, { cwd, stdio: 'inherit' });
+}
+
+/**
+ * 打包前的自检。
+ *
+ * 加这一段的起因是一个真实事故：uninstall-startup.cmd 里装的是 PowerShell 代码
+ * （做中文名改名时把内容搞错了），于是那个脚本双击后每行都报错；
+ * 同时它引用的 scripts/uninstall-startup.ps1 根本不存在 —— 两个问题都溜进了发行包。
+ * 所以这里强制校验：.cmd 引用的 .ps1 必须存在，且 .cmd 里不能出现 PowerShell 语法。
+ */
+function verifyPackaging(directory) {
+  const problems = [];
+
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.cmd$/i.test(entry.name)) continue;
+
+      const text = readFileSync(full, 'utf8');
+      const relative = full.slice(directory.length + 1);
+
+      // 1) 引用的 PowerShell 脚本必须存在
+      for (const ref of text.matchAll(/scripts[/\\]([\w.-]+\.ps1)/g)) {
+        const scriptPath = join(directory, 'scripts', ref[1]);
+        if (!existsSync(scriptPath)) {
+          problems.push(`${relative} 引用了不存在的 scripts/${ref[1]}`);
+        }
+      }
+
+      // 2) .cmd 里出现 PowerShell 语法，几乎一定是内容放错了文件
+      const psSyntax = /\$ErrorActionPreference|\$taskName|Register-ScheduledTask|Write-Host -ForegroundColor/;
+      if (psSyntax.test(text)) {
+        problems.push(`${relative} 里含有 PowerShell 代码，应该是内容放错了文件`);
+      }
+
+      // 3) 每个 .cmd 都应该有窗口标题，方便用户分辨
+      if (!/^\s*title /m.test(text)) {
+        problems.push(`${relative} 缺少 title，用户无法从窗口看出用途`);
+      }
+    }
+  };
+
+  walk(directory);
+
+  if (problems.length > 0) {
+    console.error('\nWindows 脚本自检未通过：');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    console.error('');
+    process.exit(1);
+  }
+
+  const cmdCount = readdirSync(directory).filter((name) => /\.cmd$/i.test(name)).length;
+  console.log(`Windows 脚本自检通过（${cmdCount} 个 .cmd，引用与标题均正常）`);
 }
 
 /**

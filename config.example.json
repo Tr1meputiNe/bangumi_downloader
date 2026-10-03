@@ -88,5 +88,11 @@
   "notify": {
     "console": true
   },
+  "web": {
+    "port": 3778,
+    "host": "127.0.0.1",
+    "openBrowser": true,
+    "maxResultsPerTracker": 60
+  },
   "logLevel": "info"
 }

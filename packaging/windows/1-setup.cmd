@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title 番剧自动下载 - 首次配置
+title 番剧下载 - 首次配置
 
 if not exist "config.json" (
   if exist "config.example.json" (

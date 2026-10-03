@@ -4,43 +4,51 @@ import { PlannerClient, displayName } from './planner/client.js';
 import { QbittorrentClient } from './qbittorrent/client.js';
 import { StateStore } from './state/store.js';
 import { runSync, type DownloadMode, type SyncReport } from './core/sync.js';
-import { notify } from './notify/index.js';
-import { buildQueries } from './util/text.js';
+import { searchAndRank } from './core/search.js';
 import { searchAll } from './trackers/index.js';
-import { rankCandidates } from './anime/rank.js';
+import { startWebServer } from './web/server.js';
+import { notify } from './notify/index.js';
+
+import type { ScoredCandidate } from './anime/rank.js';
 import { formatSize, today } from './util/text.js';
 import { log, logger, setLogLevel } from './util/log.js';
+import { VERSION } from './version.js';
 
 const logRun = logger('run');
 
-const HELP = `bangumi-downloader —— 从 Bangumi Watch Planner 自动搜番并推送到 qBittorrent
+const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推送到 qBittorrent
 
 用法：
   bangumi-downloader <命令> [选项]
 
 命令：
-  sync          执行一轮：抓取未看集数 → 搜种 → 选种 → 推送到 qBittorrent
+  serve         启动本地 Web 界面，手动搜索资源、挑选后下载
+  search        在命令行里搜索并打印候选（不下载）
+  sync          执行一轮自动追番：抓取未看集数 → 搜种 → 选种 → 推送
   run           守护模式，按 intervalMinutes 定时执行 sync（Ctrl+C 退出）
-  check         检查配置、Planner 与 qBittorrent 的连通性
-  preview       只搜索并打印某部番剧的候选排名，不下载（排错用）
+  check         检查配置、Planner、片源与 qBittorrent 的连通性
+  preview       只搜索并打印某部番剧的候选排名（排错用）
   config        打印当前生效的配置
 
 选项：
   --config <路径>     指定配置文件，默认 ./config.json
+  --query <关键词>    serve/search/preview 使用的搜索关键词
+  --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
+  --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
   --once              与 sync 等价
-  --query <关键词>    preview 命令使用的搜索关键词
   --verbose           输出 debug 日志
   --help              显示本帮助
 
 示例：
+  bangumi-downloader serve                     启动 Web 界面（推荐）
+  bangumi-downloader search --query "芙莉莲"    命令行搜索
   bangumi-downloader check
   bangumi-downloader sync --dry-run
   bangumi-downloader run
-  bangumi-downloader preview --query "葬送的芙莉莲"
 `;
 
-type Command = 'sync' | 'run' | 'check' | 'preview' | 'config' | 'help';
+type Command = 'serve' | 'search' | 'sync' | 'run' | 'check' | 'preview' | 'config' | 'help';
 
 export function resolveCommand(raw: string | undefined): Command {
   switch (raw) {
@@ -52,6 +60,13 @@ export function resolveCommand(raw: string | undefined): Command {
       return 'run';
     case 'check':
       return 'check';
+    case 'serve':
+    case 'web':
+    case 'ui':
+      return 'serve';
+    case 'search':
+    case 'find':
+      return 'search';
     case 'preview':
       return 'preview';
     case 'config':
@@ -200,18 +215,38 @@ async function cmdCheck(config: AppConfig, configPath: string, created: boolean)
   return ok ? 0 : 1;
 }
 
+/**
+ * 命令行搜索。与 Web 界面走同一条 searchAndRank 路径，
+ * 区别只是输出到终端。
+ */
+async function cmdSearch(config: AppConfig, query: string, limit = 30): Promise<number> {
+  if (!query) {
+    log.error('search 需要 --query 指定搜索关键词');
+    return 2;
+  }
+
+  const outcome = await searchAndRank({ query, config, mode: 'manual', resolveMikanMagnet: false });
+  log.info(`关键词：${outcome.queries.join(' / ')}`);
+  log.info(`去重后 ${outcome.ranked.length} 条候选，耗时 ${outcome.elapsedMs}ms`);
+  for (const item of outcome.errors) {
+    log.warn(`片源 ${item.tracker} 失败：${item.reason}`);
+  }
+
+  printRanked(outcome.ranked.slice(0, limit), outcome.ranked.length);
+  return 0;
+}
+
+/** preview 与 search 的区别：preview 聚焦「自动化会怎么选」，按集号严格淘汰。 */
 async function cmdPreview(config: AppConfig, query: string): Promise<number> {
   if (!query) {
     log.error('preview 需要 --query 指定搜索关键词');
     return 2;
   }
-  const queries = buildQueries(query, query);
-  log.info(`搜索关键词：${queries.join(' / ')}`);
-  const results = await searchAll({ queries, config: config.trackers, resolveMikanMagnet: false });
-  log.info(`去重后共 ${results.length} 条候选`);
 
-  const ranked = rankCandidates(results, {
-    preference: config.preference,
+  const outcome = await searchAndRank({
+    query,
+    config,
+    mode: 'automation',
     targets: [
       {
         subjectId: 0,
@@ -222,15 +257,82 @@ async function cmdPreview(config: AppConfig, query: string): Promise<number> {
         airDate: null
       }
     ],
-    targetSeason: null
+    targetSeason: null,
+    resolveMikanMagnet: false
   });
 
-  for (const item of ranked.slice(0, 25)) {
-    const flag = item.rejected ? '✗' : '✓';
-    log.info(`${flag} ${item.score.toFixed(1).padStart(6)} [${item.result.tracker}] ${formatSize(item.result.sizeBytes)} ${item.result.title}`);
-    log.info(`        集号=${item.parsed.episodes.slice(0, 3).join(',') || '-'} 类型=${item.parsed.kind} 分辨率=${item.parsed.resolution ?? '-'} 容器=${item.parsed.container ?? '-'} 字幕=${item.parsed.subtitle ?? '-'}`);
-    if (item.rejected) log.info(`        淘汰原因：${item.rejectReason}`);
+  log.info(`关键词：${outcome.queries.join(' / ')}`);
+  log.info(`按「第 1 集」严格匹配，去重后 ${outcome.ranked.length} 条候选`);
+  printRanked(outcome.ranked.slice(0, 25), outcome.ranked.length);
+  return 0;
+}
+
+function printRanked(ranked: readonly ScoredCandidate[], total: number): void {
+  if (ranked.length === 0) {
+    log.warn('没有搜到任何结果');
+    return;
   }
+  if (total > ranked.length) {
+    log.info(`（只显示前 ${ranked.length} 条，共 ${total} 条）`);
+  }
+
+  for (const item of ranked) {
+    const flag = item.rejected ? '✗' : '✓';
+    const size = formatSize(item.result.sizeBytes);
+    log.info(`${flag} ${item.score.toFixed(1).padStart(6)}  [${item.result.tracker}] ${size.padStart(9)}  ${item.result.title}`);
+    const parsed = item.parsed;
+    const episodes = parsed.episodes.length > 0
+      ? `第${parsed.episodes[0]}${parsed.episodes.length > 1 ? `-${parsed.episodes[parsed.episodes.length - 1]}` : ''}集`
+      : parsed.kind === 'batch' ? '合集' : '集号未知';
+    log.info(
+      `        ${episodes} · ${parsed.resolution ?? '分辨率未知'} · ${parsed.container ?? '容器未知'} · ` +
+        `字幕 ${parsed.subtitle ?? '未知'}${parsed.group ? ` · ${parsed.group}` : ''}`
+    );
+    if (item.rejected) {
+      log.info(`        淘汰：${item.rejectReason}`);
+    }
+  }
+}
+
+async function cmdServe(config: AppConfig, options: { port?: number; open?: boolean }): Promise<number> {
+  const effective: AppConfig = {
+    ...config,
+    web: {
+      ...config.web,
+      ...(options.port !== undefined ? { port: options.port } : {}),
+      ...(options.open !== undefined ? { openBrowser: options.open } : {})
+    }
+  };
+
+  // 只有真的能下载时才需要连 qBittorrent；连不上也让界面能用来搜索
+  let qbittorrent: QbittorrentClient | undefined;
+  if (effective.download.enabled !== false) {
+    qbittorrent = new QbittorrentClient(effective.qbittorrent, {
+      timeoutMs: effective.trackers.timeoutMs ?? 15000
+    });
+    try {
+      await qbittorrent.login();
+      log.info(`已连接 qBittorrent：${effective.qbittorrent.url}`);
+    } catch (error) {
+      log.warn(`${(error as Error).message}`);
+      log.warn('界面仍可使用搜索功能，但下载会失败；修好配置后重启本命令即可。');
+    }
+  } else {
+    log.warn('config.json 里 download.enabled = false，界面只能搜索、不能下载');
+  }
+
+  const started = await startWebServer({ config: effective, qbittorrent });
+  log.info('按 Ctrl+C 退出');
+
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      log.info('正在关闭…');
+      void started.close().then(resolve);
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+
   return 0;
 }
 
@@ -288,6 +390,8 @@ export async function main(argv: string[]): Promise<number> {
       'dry-run': { type: 'boolean', default: false },
       once: { type: 'boolean', default: false },
       query: { type: 'string' },
+      port: { type: 'string' },
+      'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
       version: { type: 'boolean', default: false }
@@ -295,7 +399,7 @@ export async function main(argv: string[]): Promise<number> {
   });
 
   if (values.version) {
-    log.info('bangumi-downloader 1.0.0');
+    log.info(`bangumi-downloader ${VERSION}`);
     return 0;
   }
 
@@ -321,6 +425,13 @@ export async function main(argv: string[]): Promise<number> {
     case 'config':
       process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
       return 0;
+    case 'serve':
+      return cmdServe(config, {
+        port: values.port !== undefined ? Number(values.port) : undefined,
+        open: values['no-open'] ? false : undefined
+      });
+    case 'search':
+      return cmdSearch(config, values.query ?? positionals[1] ?? '');
     case 'preview':
       return cmdPreview(config, values.query ?? positionals[1] ?? '');
     case 'run':

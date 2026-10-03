@@ -8,3 +8,7 @@ config.json
 .DS_Store
 .worktrees/
 .qbtest/
+
+# 前端构建产物：仓库里只保留占位模块，构建时覆盖
+src/web/generated/client-bundle.ts
+src/web/generated/client-style.ts

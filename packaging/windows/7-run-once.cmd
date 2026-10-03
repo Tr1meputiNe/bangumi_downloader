@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title 番剧自动下载 - 执行一次
+title 番剧下载 - 自动追番（执行一轮）
 
 if not exist "config.json" (
   echo 还没有 config.json，请先双击 1-setup.cmd。
