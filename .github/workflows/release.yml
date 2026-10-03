@@ -88,9 +88,24 @@ jobs:
       - name: Create release archive
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
           $zip = "bangumi-downloader-$tag-windows-x64.zip"
-          Compress-Archive -Path "release/windows/*" -DestinationPath $zip -Force
+
+          # 必须用 tar（bsdtar）而不是 Compress-Archive：
+          # Compress-Archive 会用系统 OEM 代码页写文件名，包里那些中文 .cmd
+          # 解压出来会变成乱码（实测 "1 首次配置.cmd" 会变成 "1 ??????.cmd"）。
+          # bsdtar 默认以 UTF-8 写入并设置 UTF-8 标志位，Windows 资源管理器、
+          # 7-Zip、WinRAR 都能正确还原中文名。
+          Push-Location release/windows
+          try {
+            tar.exe -a -c -f "../../$zip" *
+            if ($LASTEXITCODE -ne 0) { throw "tar 打包失败，退出码 $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          if (-not (Test-Path $zip)) { throw "没有生成 $zip" }
+
           Get-FileHash $zip -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
             Set-Content "SHA256SUMS.txt"
