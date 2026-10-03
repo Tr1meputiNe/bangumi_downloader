@@ -79,12 +79,9 @@ function createClients(config: AppConfig, mode: DownloadMode) {
 export async function runOnce(config: AppConfig, mode: DownloadMode): Promise<SyncReport | null> {
   const { planner, state, qbittorrent } = createClients(config, mode);
 
-  if (qbittorrent) {
-    await qbittorrent.login();
-    if (config.qbittorrent.category) {
-      await qbittorrent.ensureCategory(config.qbittorrent.category, config.qbittorrent.savePath || undefined);
-    }
-  }
+  // 提前登录一次，好让「qBittorrent 没开 / 密码不对」这类问题在开跑前就报出来。
+  // 分类的创建交给 runSync 内部处理 —— 只有真的要推送时才需要分类。
+  if (qbittorrent) await qbittorrent.login();
 
   const report = await runSync({ planner, state, qbittorrent, config, today: today() }, mode);
   printSummary(report);

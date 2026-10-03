@@ -154,6 +154,19 @@ export async function runSync(deps: SyncDeps, mode: DownloadMode): Promise<SyncR
     stats: { subjects: 0, missingEpisodes: 0, planned: 0, downloaded: 0, skippedHistory: 0, noRelease: 0 }
   };
 
+  // 真正推送前先确保 qBittorrent 里已经有目标分类。
+  // 放在这里而不是 CLI 里，是因为任何走 runSync 的入口都必须保证分类存在，
+  // 否则种子会被推到一个不存在的分类上。用进程内标记避免重复请求。
+  let categoryReady = qbittorrent === undefined;
+  const ensureCategoryOnce = async (): Promise<void> => {
+    if (categoryReady || !qbittorrent) return;
+    categoryReady = true;
+    await qbittorrent.login();
+    if (config.qbittorrent.category) {
+      await qbittorrent.ensureCategory(config.qbittorrent.category, config.qbittorrent.savePath || undefined);
+    }
+  };
+
   const gaps = await planner.collectGaps({
     collectionTypes: config.collectionTypes,
     includeBacklog: config.includeBacklog,
@@ -249,6 +262,7 @@ export async function runSync(deps: SyncDeps, mode: DownloadMode): Promise<SyncR
       if (!qbittorrent) throw new Error('内部错误：非 dry-run 模式必须提供 qBittorrent 客户端');
 
       try {
+        await ensureCategoryOnce();
         const added = await pushTorrent(qbittorrent, config, torrentPlan);
         report.stats.downloaded += torrentPlan.episodes.length;
         report.added.push(added);

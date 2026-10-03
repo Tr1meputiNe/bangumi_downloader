@@ -59,11 +59,17 @@ export type AddTorrentOptions = {
 export class QbittorrentClient {
   readonly #config: QbittorrentConfig;
   readonly #timeoutMs: number;
+  readonly #fetch: typeof globalThis.fetch;
   #cookie: string | null = null;
 
-  constructor(config: QbittorrentConfig, options: { timeoutMs?: number } = {}) {
+  constructor(
+    config: QbittorrentConfig,
+    options: { timeoutMs?: number; fetchImpl?: typeof globalThis.fetch } = {}
+  ) {
     this.#config = config;
     this.#timeoutMs = options.timeoutMs ?? 15000;
+    // 允许注入 fetch，便于用本地 mock 服务器做集成测试
+    this.#fetch = options.fetchImpl ?? globalThis.fetch;
   }
 
   get baseUrl(): string {
@@ -80,7 +86,7 @@ export class QbittorrentClient {
     if (this.#cookie) headers.set('cookie', this.#cookie);
 
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
+      const response = await this.#fetch(`${this.baseUrl}${path}`, {
         ...init,
         headers,
         signal: controller.signal
