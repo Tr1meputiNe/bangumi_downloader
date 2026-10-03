@@ -3,7 +3,18 @@
   番剧资源搜索 + 自动追番，统一推送到 qBittorrent
 </p>
 
-一个工具，两种用法，共用同一套片源与挑选规则：
+一个工具，几种用法，共用同一套片源与挑选规则：
+
+**⓪ 直接下载**（命令行 / 双击脚本）—— 说个番名，自动挑能下动的那一条下下来
+
+```bash
+bangumi-downloader download --query "吹响上低音号 第三季"
+bangumi-downloader download --query "葬送的芙莉莲" --episodes 1-13
+```
+
+打分高不等于下得动：实测有些做种最多的合集只有几 KB/s。所以它会**逐条候选试跑**，
+量真实吞吐，不行就换下一条（整季合集 → 无集号的整季发布 → 单集），
+并把已下部分留着断点续传。默认用**自带的下载引擎**，不需要装 qBittorrent。
 
 **① 手动搜索**（Web 界面）—— 想看什么自己搜，挑完再下
 
@@ -13,16 +24,20 @@ bangumi-downloader serve        # 打开 http://127.0.0.1:3778/
 
 在网页里输入番剧名，结果会从 **animes.garden、mikan、nyaa** 三个站并行抓取并按偏好排序，
 每条都标出**集号、分辨率、容器、字幕语言、字幕组、体积、做种数**，
-勾选后一键推送到 qBittorrent。
+勾选后一键下载（走自带引擎；把 `download.backend` 设成 `qbittorrent` 则推送到 qBittorrent）。
 
 **② 自动追番**（常驻）—— 新番更新后自动收
 
+有两种数据来源，按你的环境选：
+
 ```bash
-bangumi-downloader run          # 每 30 分钟检查一次
+bangumi-downloader auto --daemon   # 读同目录的 watchlist.json（不依赖任何外部服务）
+bangumi-downloader run             # 读本机 Bangumi Watch Planner（127.0.0.1:3777）
 ```
 
-读取你本机 **Bangumi Watch Planner**（默认 `http://127.0.0.1:3777`）里的追番数据，
-找出「在看」的番剧里**还没看、但已经播出**的集数，搜种、打分、自动推送。
+`auto` 适合把下载器单独部署到一台机器上（例如 NAS、Windows 小主机）长期跑：
+`watchlist.json` 里写要追哪些番，发现没下过的新集就下，下完自动推进进度。
+`run` 则适合和 Watch Planner 装在同一台机器上的场景。
 
 两者共享的挑选逻辑：
 

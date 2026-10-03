@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:net';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { BLOCK_SIZE, PeerConnection, generatePeerId, hexToBytes, type PeerMessage } from './peer.js';
 import { fetchMetadataFromPeer, sleep } from './metadata.js';
 import { DhtClient } from './dht.js';
@@ -49,6 +51,14 @@ export type DownloadOptions = {
   blockTimeoutMs?: number;
   /** 每条连接允许的在途 block 数，默认 64。 */
   pipelineDepth?: number;
+  /**
+   * 元数据缓存目录。
+   *
+   * 拿到 info 字典后存一份到 <cacheDir>/<infohash>.bin，下次要判断
+   * 「这个候选是不是已经下过一半」时就不用再联网找一遍 peer 了 ——
+   * 磁力链接本身不含文件名，没有这份缓存就无法在离线状态下定位下载目录。
+   */
+  metadataCacheDir?: string;
 };
 
 export type DownloadProgress = {
@@ -169,10 +179,31 @@ export class TorrentDownloader extends EventEmitter {
       if (!hasContent(meta)) throw new Error('种子内没有任何文件');
 
       this.#options.onMetadata?.(meta);
+      this.#cacheMetadata(meta);
+
+      /*
+       * 默认排除「填充文件」。
+       *
+       * BitComet 之类的客户端会在种子里塞 _____padding_file_* 来对齐分片边界，
+       * 内容全是 0，下了纯属浪费带宽和磁盘。qBittorrent 默认也是跳过的。
+       * 用户显式指定了 selectedFiles 时以用户的为准，不覆盖他的选择。
+       */
+      const paddingIndexes = new Set(
+        meta.files.filter((file) => isPaddingFile(file.path)).map((file) => file.index)
+      );
+      const explicit = this.#options.selectedFiles;
+      const selectedFiles: number[] =
+        explicit && explicit.length > 0
+          ? explicit
+          : meta.files.map((file) => file.index).filter((index) => !paddingIndexes.has(index));
+
+      if (paddingIndexes.size > 0) {
+        this.#log(`种子内含 ${paddingIndexes.size} 个填充文件（BitComet 对齐用），已自动跳过`);
+      }
 
       this.#storage = new TorrentStorage(meta, {
         savePath: this.#options.savePath,
-        selectedFiles: this.#options.selectedFiles
+        selectedFiles: selectedFiles.length === meta.files.length ? undefined : selectedFiles
       });
 
       const wanted = this.#storage.wantedPieces();
@@ -233,6 +264,18 @@ export class TorrentDownloader extends EventEmitter {
       clearTimeout(hardTimer);
       this.#options.signal?.removeEventListener('abort', abort);
       await this.#cleanup();
+    }
+  }
+
+  /** 把 info 字典存到缓存目录，供下次离线判断「是否已有进度」。 */
+  #cacheMetadata(meta: TorrentMeta): void {
+    const dir = this.#options.metadataCacheDir;
+    if (!dir) return;
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${meta.infoHash}.bin`), meta.infoBytes);
+    } catch (error) {
+      log.debug(`写元数据缓存失败（不影响下载）：${(error as Error).message}`);
     }
   }
 
@@ -1039,6 +1082,12 @@ export class TorrentDownloader extends EventEmitter {
 
 function blockKey(piece: number, begin: number): string {
   return `${piece}:${begin}`;
+}
+
+/** 是否是 BitComet 的对齐填充文件。 */
+export function isPaddingFile(path: string): boolean {
+  const name = path.split('/').pop() ?? path;
+  return /^_*padding_file_/i.test(name) || /_____padding_file_/i.test(name);
 }
 
 function shortTracker(url: string): string {

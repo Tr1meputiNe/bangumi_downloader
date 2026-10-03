@@ -61,6 +61,12 @@ export type DownloadPreference = {
   maxAttempts?: number;
   /** 一次 download 的总时间预算（分钟）。默认 360。 */
   budgetMinutes?: number;
+  /** 单次命令最多重试几轮（每轮都从磁盘进度继续）。默认 6。 */
+  retryRounds?: number;
+  /** 重试间隔（分钟），之后按倍数退避。默认 10。 */
+  retryBackoffMinutes?: number;
+  /** 重试间隔上限（分钟）。默认 120。 */
+  retryMaxBackoffMinutes?: number;
   /** 单个番剧单轮最多推送多少集。 */
   maxEpisodesPerSubjectPerRun?: number;
   /** 单轮总共最多推送多少个种子。 */
@@ -145,6 +151,11 @@ export type AppConfig = {
   web: WebConfig;
   /** 日志级别。 */
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  /**
+   * 日志文件路径。
+   * 留空时：auto 模式固定写 ./data/bangumi.log（无人值守必须留痕），其他命令只输出到屏幕。
+   */
+  logFile?: string;
 };
 
 export const DEFAULT_WEIGHTS: ScoreWeights = {
@@ -184,7 +195,12 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     minThroughputKBps: 30,
     maxAttempts: 8,
     budgetMinutes: 360,
-    maxEpisodesPerSubjectPerRun: 3,
+    retryRounds: 6,
+    retryBackoffMinutes: 10,
+    retryMaxBackoffMinutes: 120,
+    // 单部番单轮处理几集。默认不限制：内置引擎是按种子下载的，
+    // 把它切小只会让「一整季」被拆成很多轮，反而更慢。
+    maxEpisodesPerSubjectPerRun: 999,
     maxTorrentsPerRun: 10,
     onlyAiredAfter: null,
     lookbackDays: null

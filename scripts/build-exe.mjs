@@ -22,12 +22,28 @@ const executablePath = join(releaseDir, `bangumi-downloader${extension}`);
 const postjectCli = join(root, 'node_modules', 'postject', 'dist', 'cli.js');
 
 /*
- * 重新构建会把产物目录整个删掉。用户可能已经把 config.json 放在那儿改好了，
- * 直接删掉等于悄悄清空他的配置（下载目录、后端选择、片源开关全没了），
+ * 重新构建会把产物目录整个删掉，而那里放着**用户的状态**：
+ *   - config.json     下载目录、后端选择、片源开关……
+ *   - watchlist.json  追番清单和已经下到第几集
+ *   - data/           下载记录、日志、单实例锁
+ * 直接删掉等于把这些全部清零（实测清单被删过一次，下一轮就当新番重下）。
  * 所以先备份、构建完再放回去。
  */
-const existingConfigPath = join(releaseDir, 'config.json');
-const savedConfig = existsSync(existingConfigPath) ? readFileSync(existingConfigPath) : null;
+const preserved = ['config.json', 'watchlist.json'];
+const savedFiles = new Map();
+for (const name of preserved) {
+  const path = join(releaseDir, name);
+  if (existsSync(path)) savedFiles.set(path, readFileSync(path));
+}
+
+const existingDataDir = join(releaseDir, 'data');
+const savedDataDir = existsSync(existingDataDir) ? join(root, '.build-data-backup') : null;
+
+// data/ 先挪出去（里面可能有正在用的锁和日志），构建完再挪回来
+if (savedDataDir) {
+  rmSync(savedDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  cpSync(existingDataDir, savedDataDir, { recursive: true });
+}
 
 rmSync(releaseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 mkdirSync(releaseDir, { recursive: true });
@@ -140,9 +156,19 @@ if (process.platform === 'win32') {
 // —— uninstall-startup.cmd 装错内容那件事就是这么溜进发行包的。
 verifyPackaging(join(root, 'packaging', 'windows'));
 
-if (savedConfig) {
-  writeFileSync(existingConfigPath, savedConfig);
-  console.log('已保留产物目录里原有的 config.json（重新构建不会清掉你的配置）');
+for (const [path, content] of savedFiles) {
+  writeFileSync(path, content);
+}
+if (savedFiles.size > 0) {
+  console.log(`已保留产物目录里原有的 ${[...savedFiles.keys()].map((p) => p.split(/[\\/]/).pop()).join('、')}`);
+}
+
+if (savedDataDir) {
+  const targetDataDir = join(releaseDir, 'data');
+  rmSync(targetDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  cpSync(savedDataDir, targetDataDir, { recursive: true });
+  rmSync(savedDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  console.log('已保留 data/（下载记录与日志）');
 }
 
 console.log(`产物目录：${releaseDir}`);

@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import { dirname, join } from 'node:path';
 import { loadConfig, type AppConfig } from './config.js';
 import { PlannerClient, displayName } from './planner/client.js';
 import { QbittorrentClient } from './qbittorrent/client.js';
@@ -8,6 +9,8 @@ import { searchAndRank } from './core/search.js';
 import { dispatchDownload, resolveBackend } from './core/dispatch.js';
 import { downloadWithFallback } from './core/fallback.js';
 import { runAuto } from './core/auto.js';
+import { downloadUntilComplete } from './core/retry.js';
+import { acquireLock } from './core/lock.js';
 import { ensureWatchlistExample, watchlistPath } from './core/watchlist.js';
 import { searchAll } from './trackers/index.js';
 import { startWebServer } from './web/server.js';
@@ -15,7 +18,7 @@ import { notify } from './notify/index.js';
 
 import type { ScoredCandidate } from './anime/rank.js';
 import { formatSize, today } from './util/text.js';
-import { log, logger, setLogLevel } from './util/log.js';
+import { log, logger, setLogFile, setLogLevel } from './util/log.js';
 import { VERSION } from './version.js';
 
 const logRun = logger('run');
@@ -43,6 +46,8 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --save-path <目录>  download 的保存目录，覆盖 config.json 里的设置
   --watchlist <文件>  auto 使用的追番清单，默认与 config.json 同目录的 watchlist.json
   --interval <分钟>   auto --daemon 的轮询间隔，默认取 config.intervalMinutes
+  --retry <轮数>      download/auto 最多重试几轮（每轮从磁盘进度继续），默认取配置
+  --no-retry          只跑一轮，不自动重试
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -293,6 +298,8 @@ export type DownloadCommandOptions = {
   /** 覆盖下载目录。 */
   savePath?: string;
   dryRun: boolean;
+  /** 最多重试几轮；0 表示只跑一轮。 */
+  retryRounds: number;
 };
 
 /**
@@ -302,7 +309,7 @@ export type DownloadCommandOptions = {
  * 没有合集就退回分数最高的单集。这跟自动追番的「按缺失集号严格匹配」是两回事 ——
  * 这里用户要的是「把这一季拉下来」。
  */
-async function cmdDownload(config: AppConfig, options: DownloadCommandOptions): Promise<number> {
+async function cmdDownload(config: AppConfig, configPath: string, options: DownloadCommandOptions): Promise<number> {
   if (!options.query) {
     log.error('download 需要 --query 指定搜索关键词');
     return 2;
@@ -364,29 +371,45 @@ async function cmdDownload(config: AppConfig, options: DownloadCommandOptions): 
    * 「整季 → 无集号整季 → 单集」的顺序逐条实测，谁有速度就下谁。
    */
   log.info(`下载后端：builtin｜保存到 ${savePath}`);
-  log.info(`将从 ${Math.min(outcome.ranked.length, 8)} 条候选里逐条实测吞吐，挑能下动的`);
 
-  const result = await downloadWithFallback({
-    candidates: outcome.ranked,
-    config,
-    episodes: options.episodes,
-    savePath,
-    trialSeconds: config.download.trialSeconds ?? 90,
-    minThroughput: (config.download.minThroughputKBps ?? 40) * 1024,
-    maxAttempts: config.download.maxAttempts ?? 8,
-    budgetMs: (config.download.budgetMinutes ?? 360) * 60_000,
-    onLog: (message) => log.debug(message)
-  });
+  // 单实例锁：计划任务可能在上一次还没跑完时就又触发一次
+  const lock = acquireLock(join(dirname(configPath), 'data', '.bangumi.lock'), `download ${options.query}`);
+  if (!lock) return 0;
 
-  log.info(
-    `${result.completed ? '下载完成' : '部分完成'}：${result.files.length} 个文件，` +
-      `共 ${formatSize(result.bytesWritten)}`
-  );
-  for (const file of result.files.slice(0, 40)) log.info(`  · ${file}`);
-  if (!result.completed) {
-    log.warn('没能完整下完（候选吞吐都不够）。已保留已下载的部分，稍后可以重跑续传。');
+  try {
+    const result = await downloadUntilComplete({
+      candidates: outcome.ranked,
+      config,
+      episodes: options.episodes,
+      savePath,
+      rounds: Math.max(1, options.retryRounds),
+      backoffMs: (config.download.retryBackoffMinutes ?? 10) * 60_000,
+      maxBackoffMs: (config.download.retryMaxBackoffMinutes ?? 120) * 60_000,
+      onLog: (message) => log.debug(message)
+    });
+
+    log.info(
+      `${result.completed ? '下载完成' : '本轮未下完'}：${result.files.length} 个文件，` +
+        `共 ${formatSize(result.bytesWritten)}（尝试 ${result.rounds} 轮）`
+    );
+    for (const file of result.files.slice(0, 40)) log.info(`  · ${file}`);
+    if (!result.completed) {
+      log.warn('已保留全部进度，下次运行会自动从这里继续（不会重下已有数据）。');
+    }
+    return result.completed ? 0 : 1;
+  } finally {
+    lock.release();
   }
-  return result.completed ? 0 : 1;
+}
+
+/** --retry / --no-retry 与配置的优先级。 */
+function resolveRetryRounds(config: AppConfig, retryFlag: string | undefined, noRetry: boolean): number {
+  if (noRetry) return 1;
+  if (retryFlag !== undefined) {
+    const parsed = Number.parseInt(retryFlag, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return config.download.retryRounds ?? 6;
 }
 
 function printRanked(ranked: readonly ScoredCandidate[], total: number): void {
@@ -512,7 +535,7 @@ async function cmdRun(config: AppConfig, mode: DownloadMode): Promise<number> {
 async function cmdAuto(
   config: AppConfig,
   configPath: string,
-  options: { watchlistFile?: string; daemon: boolean; intervalMinutes?: number; dryRun: boolean }
+  options: { watchlistFile?: string; daemon: boolean; intervalMinutes?: number; dryRun: boolean; retryRounds: number }
 ): Promise<number> {
   const path = options.watchlistFile ?? watchlistPath(configPath);
   if (ensureWatchlistExample(path)) {
@@ -524,18 +547,45 @@ async function cmdAuto(
   const intervalMinutes = options.intervalMinutes ?? config.intervalMinutes ?? 30;
 
   const runOnceAuto = async (): Promise<number> => {
+    // 单实例锁：计划任务和守护模式可能同时被触发
+    const lock = acquireLock(join(dirname(configPath), 'data', '.bangumi.lock'), 'auto');
+    if (!lock) return 0;
+
+    try {
+      return await runAutoOnce();
+    } finally {
+      lock.release();
+    }
+  };
+
+  const runAutoOnce = async (): Promise<number> => {
+    try {
+      return await runAutoInner();
+    } catch (error) {
+      // 无人值守时不要把异常抛给计划任务：日志里有完整记录就够了，
+      // 任务历史里一堆「失败」反而会掩盖真正需要处理的问题。
+      log.error(`本轮自动追番异常：${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      return 0;
+    }
+  };
+
+  const runAutoInner = async (): Promise<number> => {
     const report = await runAuto({
       config,
       configPath,
       dryRun: options.dryRun,
-      watchlistFile: options.watchlistFile
+      watchlistFile: options.watchlistFile,
+      retryRounds: options.retryRounds
     });
     log.info(
       `本轮结束：清单 ${report.subjects} 条，检查 ${report.checked} 条，` +
         `新下载 ${report.downloaded.length} 条，跳过 ${report.skipped.length} 条`
     );
     for (const item of report.downloaded) {
-      log.info(`  + 《${item.query}》第${item.episodes.join('/')}集 → ${item.files} 个文件${item.completed ? '' : '（未下完）'}`);
+      log.info(
+        `  + 《${item.query}》第${item.episodes.join('/')}集 → ${item.files} 个文件` +
+          `，${formatSize(item.bytesWritten)}${item.completed ? '' : '（未下完，进度已保留）'}`
+      );
     }
     return 0;
   };
@@ -608,6 +658,8 @@ export async function main(argv: string[]): Promise<number> {
       watchlist: { type: 'string' },
       daemon: { type: 'boolean', default: false },
       interval: { type: 'string' },
+      retry: { type: 'string' },
+      'no-retry': { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -629,6 +681,14 @@ export async function main(argv: string[]): Promise<number> {
 
   const { config, configPath, created } = loadConfig({ configPath: values.config });
   setLogLevel(values.verbose || config.logLevel === 'debug' ? 'debug' : config.logLevel ?? 'info');
+
+  /*
+   * 自动模式（auto）会挂在计划任务里无人值守地跑，所以固定写一份文件日志。
+   * 其他命令是交互式的，屏幕输出就够了，不额外落盘。
+   */
+  if (command === 'auto' || values.verbose || config.logFile) {
+    setLogFile(config.logFile ?? join(dirname(configPath), 'data', 'bangumi.log'));
+  }
 
   if (created) {
     log.info(`已生成默认配置文件：${configPath}`);
@@ -653,18 +713,20 @@ export async function main(argv: string[]): Promise<number> {
     case 'preview':
       return cmdPreview(config, values.query ?? positionals[1] ?? '');
     case 'download':
-      return cmdDownload(config, {
+      return cmdDownload(config, configPath, {
         query: values.query ?? positionals[1] ?? '',
         episodes: parseEpisodeSpec(values.episodes),
         savePath: values['save-path'],
-        dryRun: values['dry-run']
+        dryRun: values['dry-run'],
+        retryRounds: resolveRetryRounds(config, values.retry, values['no-retry'])
       });
     case 'auto':
       return cmdAuto(config, configPath, {
         watchlistFile: values.watchlist,
         daemon: values.daemon,
         intervalMinutes: values.interval !== undefined ? Number(values.interval) : undefined,
-        dryRun: values['dry-run'] || config.download.enabled === false
+        dryRun: values['dry-run'] || config.download.enabled === false,
+        retryRounds: resolveRetryRounds(config, values.retry, values['no-retry'])
       });
     case 'run':
       return cmdRun(config, mode);

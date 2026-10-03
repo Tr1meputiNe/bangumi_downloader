@@ -20,6 +20,15 @@ export type WatchEntry = {
   query: string;
   /** 已经下载到第几集（含）。下一轮从这里 +1 开始找。 */
   lastEpisode?: number;
+  /**
+   * 逐集的下完记录。
+   *
+   * 为什么还要这个：合集的下载经常一次下不完（跨境速度有限），
+   * 而 lastEpisode 是「连续追到第几集」的语义，只能整体推进。
+   * 有了这个集合，即使合集只下完了一部分、顺序还是乱的，
+   * 下一轮也能准确知道「哪几集已经有了」，不去重下，也不会漏下。
+   */
+  completedEpisodes?: number[];
   /** 只从这一集开始追。留空表示从第 1 集开始。 */
   startFrom?: number;
   /** 备注，方便自己认。 */
@@ -53,6 +62,9 @@ export function loadWatchlist(path: string): Watchlist {
         .map((item) => ({
           query: item.query,
           lastEpisode: typeof item.lastEpisode === 'number' ? item.lastEpisode : undefined,
+          completedEpisodes: Array.isArray(item.completedEpisodes)
+            ? item.completedEpisodes.filter((value): value is number => typeof value === 'number' && value > 0)
+            : undefined,
           startFrom: typeof item.startFrom === 'number' ? item.startFrom : undefined,
           note: typeof item.note === 'string' ? item.note : undefined,
           enabled: item.enabled !== false
@@ -87,5 +99,38 @@ export function setLastEpisode(path: string, query: string, lastEpisode: number)
   const entry = list.entries.find((item) => item.query === query);
   if (entry) entry.lastEpisode = Math.max(entry.lastEpisode ?? 0, lastEpisode);
   else list.entries.push({ query, lastEpisode });
+  saveWatchlist(path, list);
+}
+
+/**
+ * 记录「哪几集已经下完」，并把 lastEpisode 推进到连续完成的最远位置。
+ *
+ * 只标记真正下完的集：下到一半的集不记，下一轮自然还会被挑中继续下。
+ */
+export function markEpisodesCompleted(path: string, query: string, episodes: readonly number[]): void {
+  if (episodes.length === 0) return;
+  const list = loadWatchlist(path);
+  let entry = list.entries.find((item) => item.query === query);
+  if (!entry) {
+    entry = { query };
+    list.entries.push(entry);
+  }
+
+  const done = new Set([...(entry.completedEpisodes ?? []), ...episodes]);
+  entry.completedEpisodes = [...done].sort((a, b) => a - b);
+
+  // 连续完成到第几集：中间缺集就不往前推，避免把缺的那集当成下过了。
+  // startFrom 缺省时必须落到 1：写成 (entry.startFrom ?? 1) > 0 ? entry.startFrom : 1
+  // 会让 start 变成 undefined，consecutive 变 NaN，lastEpisode 就永远推不动。
+  const startFrom = entry.startFrom;
+  const start = typeof startFrom === 'number' && startFrom > 0 ? startFrom : 1;
+  let consecutive = start - 1;
+  for (const episode of entry.completedEpisodes) {
+    if (episode <= consecutive) continue;
+    if (episode === consecutive + 1) consecutive = episode;
+    else break;
+  }
+  entry.lastEpisode = Math.max(entry.lastEpisode ?? 0, consecutive);
+
   saveWatchlist(path, list);
 }
