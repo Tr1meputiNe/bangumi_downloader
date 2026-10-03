@@ -180,6 +180,18 @@ describe('Web 服务', () => {
     }
   });
 
+  it('/api/status 分开返回版本与连接状态', async () => {
+    const response = await fetch(`${started.url}api/status`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    // 版本号必须始终是纯版本号，不能混进错误信息
+    expect(typeof body.version).toBe('string');
+    expect(body.version as string).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(body.qbittorrent).toBe('not-configured');
+    // message 是给人看的一句话，不应包含换行
+    expect(body.message as string).not.toContain('\n');
+  });
+
   it('/healthz 返回 ok', async () => {
     const response = await fetch(`${started.url}healthz`);
     expect(await response.json()).toEqual({ ok: true });

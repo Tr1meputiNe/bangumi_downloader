@@ -72,19 +72,23 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
 }
 
 async function buildStatus(deps: WebDeps) {
-  const version = VERSION;
+  // 分开返回「应用版本」和「qBittorrent 连接情况」。
+  // 之前把整段错误信息塞进 version 字段，前端会渲染出一大串带换行的报错，很难看。
+  const base = { version: VERSION, planner: deps.config.plannerBaseUrl };
+
   if (!deps.qbittorrent) {
-    return { qbittorrent: 'not-configured', version, planner: deps.config.plannerBaseUrl };
+    return { ...base, qbittorrent: 'not-configured', message: '未配置 qBittorrent（只能搜索，不能下载）' };
   }
+
   try {
     const info = await deps.qbittorrent.version();
-    return { qbittorrent: 'ok', version: `${info.app} (WebAPI ${info.api})`, planner: deps.config.plannerBaseUrl };
+    return { ...base, qbittorrent: 'ok', message: `qBittorrent ${info.app}`, webapi: info.api };
   } catch (error) {
-    return {
-      qbittorrent: 'error',
-      version: error instanceof Error ? error.message : String(error),
-      planner: deps.config.plannerBaseUrl
-    };
+    const raw = error instanceof Error ? error.message : String(error);
+    // 只取第一行作为提示，完整原因写进日志
+    const firstLine = raw.split('\n')[0] ?? raw;
+    log.warn(`qBittorrent 连接失败：${raw}`);
+    return { ...base, qbittorrent: 'error', message: firstLine };
   }
 }
 

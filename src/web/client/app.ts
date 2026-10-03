@@ -8,7 +8,7 @@
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { html } from './html.js';
-import { api, type AddResponse, type ResultItem, type SearchResponse } from './api.js';
+import { api, type AddResponse, type ResultItem, type SearchResponse, type StatusResponse } from './api.js';
 import { formatSize, relativeTime, shortTracker } from './format.js';
 
 const QUALITY_LABELS: Record<string, string> = {
@@ -37,7 +37,7 @@ function App() {
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [onlyPreferred, setOnlyPreferred] = useState(false);
   const [trackerFilter, setTrackerFilter] = useState('all');
-  const [status, setStatus] = useState<{ qbittorrent: string; version: string } | null>(null);
+  const [status, setStatus] = useState<StatusResponse | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -146,10 +146,9 @@ function App() {
           </div>
         </div>
         <div class="status">
-          ${status
-            ? html`<span class=${`dot ${status.qbittorrent === 'ok' ? 'on' : 'off'}`}></span>
-                <span>qBittorrent ${status.version}</span>`
-            : html`<span class="dot off"></span><span>qBittorrent 未连接</span>`}
+          <span class=${`dot ${status?.qbittorrent === 'ok' ? 'on' : 'off'}`}></span>
+          <span title=${status?.message ?? ''}>${status ? status.message : '正在检查 qBittorrent…'}</span>
+          <span class="dim">v${status?.version ?? '…'}</span>
         </div>
       </header>
 

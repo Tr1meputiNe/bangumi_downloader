@@ -51,8 +51,14 @@ export type AddResponse = {
 };
 
 export type StatusResponse = {
+  /** ok | error | not-configured */
   qbittorrent: string;
+  /** 应用版本号，始终存在。 */
   version: string;
+  /** 人类可读的连接状态描述。 */
+  message: string;
+  planner: string;
+  webapi?: string;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
