@@ -1,0 +1,92 @@
+{
+  "plannerBaseUrl": "http://127.0.0.1:3777",
+  "intervalMinutes": 30,
+  "collectionTypes": [
+    3
+  ],
+  "includeBacklog": false,
+  "preference": {
+    "requireKeywords": [],
+    "excludeKeywords": [
+      "预告",
+      "pv",
+      "cm",
+      "menu",
+      "ncop",
+      "nced",
+      "sample",
+      "sample2"
+    ],
+    "containerPreference": [
+      "mkv",
+      "mp4",
+      "avi"
+    ],
+    "resolutionPreference": [
+      "1080p",
+      "2160p",
+      "720p"
+    ],
+    "subtitlePreference": [
+      "简日",
+      "简繁",
+      "简体",
+      "简中",
+      "chs",
+      "cht",
+      "繁体",
+      "繁中"
+    ],
+    "preferGroups": [],
+    "avoidGroups": [],
+    "seederSaturation": 20,
+    "preferBatch": true,
+    "weights": {
+      "container": 30,
+      "resolution": 40,
+      "subtitle": 50,
+      "group": 20,
+      "seeders": 15,
+      "batch": 10
+    }
+  },
+  "download": {
+    "enabled": true,
+    "maxEpisodesPerSubjectPerRun": 3,
+    "maxTorrentsPerRun": 10,
+    "onlyAiredAfter": null,
+    "lookbackDays": null
+  },
+  "qbittorrent": {
+    "url": "http://127.0.0.1:8080",
+    "username": "admin",
+    "password": "adminadmin",
+    "savePath": "",
+    "category": "Bangumi",
+    "tags": [
+      "bangumi-downloader"
+    ],
+    "paused": false
+  },
+  "trackers": {
+    "animesGarden": true,
+    "mikan": true,
+    "nyaa": true,
+    "nyaaHosts": [
+      "https://nyaa.land",
+      "https://nyaa.si"
+    ],
+    "mikanBase": "https://mikanani.me",
+    "maxResultsPerTracker": 60,
+    "timeoutMs": 15000,
+    "retries": 2
+  },
+  "state": {
+    "file": "./data/state.json",
+    "retentionDays": 180
+  },
+  "notify": {
+    "console": true
+  },
+  "logLevel": "info"
+}

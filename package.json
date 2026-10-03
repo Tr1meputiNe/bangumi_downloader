@@ -1,0 +1,34 @@
+{
+  "name": "bangumi-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "从本地 Bangumi Watch Planner 抓取追番进度，自动搜种并推送到 qBittorrent",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "sync": "tsx src/index.ts sync",
+    "run": "tsx src/index.ts run",
+    "check": "tsx src/index.ts check",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "build": "node scripts/build-exe.mjs",
+    "build:portable": "node scripts/build-portable.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.28.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^4.0.15"
+  }
+}
