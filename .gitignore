@@ -7,3 +7,4 @@ config.json
 *.log
 .DS_Store
 .worktrees/
+.qbtest/
