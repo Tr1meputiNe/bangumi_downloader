@@ -82,7 +82,16 @@ const SEASON_RES: Array<{ re: RegExp; group: number }> = [
 ];
 
 export function parseSeason(text: string): number | null {
-  const normalized = normalizeDigits(text);
+  // 先压缩 Season/Episode 写法；组合标记里的季度最准确，优先采用
+  const normalized = compactSeasonEpisode(normalizeDigits(text));
+
+  const combined = /S(\d{1,2})E\d{1,4}(?![0-9])/i.exec(normalized);
+  const combinedSeason = combined?.[1];
+  if (combinedSeason !== undefined) {
+    const value = Number(combinedSeason);
+    if (Number.isFinite(value) && value >= 1 && value <= 20) return value;
+  }
+
   for (const { re, group } of SEASON_RES) {
     const match = re.exec(normalized);
     const raw = match?.[group];
@@ -96,15 +105,108 @@ export function parseSeason(text: string): number | null {
 type EpisodeCandidate = { number: number; index: number; specificity: number; rangeEnd?: number };
 
 /**
+ * 形如 S02E01 / s2e13 / S02.E01 / S02EP01 / Season 2 Episode 5 的组合标记。
+ *
+ * 必须最先处理：否则 "The.Ramparts.of.Ice.S02E01" 里的 02 会被当成集号，
+ * 但 01 才是真正的集号，结果就是给「第 2 集」下到了「第 1 集」。
+ *
+ * 策略是「先归一化，再匹配一条简单正则」：与其和 "Season 2 - Episode 12"
+ * 这种分隔符组合反复纠缠（真实踩过的坑），不如先把 Season/Episode 及其
+ * 前后的分隔符统一压成紧凑写法 S2E12，之后只需面对一种形态。
+ */
+const COMPACT_MARKER = /(?:^|[^A-Za-z0-9])S(?:eason)?[\s._-]*(\d{1,2})[\s._-]*E(?:P|pisode)?[\s._-]*(\d{1,4})/gi;
+
+/**
+ * 把 Season/Episode 写法压成紧凑的 S<季>E<集>，并保持字符串长度不变。
+ *
+ * 长度不变是硬性要求：解析器里所有候选的 index 共用同一套坐标，
+ * 长度一变，后面的区间匹配与文件选择就会全部错位。
+ * 压缩后的写法总是不长于原文，多出来的位置补空格即可。
+ * 同时用 occupied 标记避免对已生成的标记做二次匹配。
+ */
+function compactSeasonEpisode(text: string): string {
+  const chars = [...text];
+  const occupied = new Array<boolean>(chars.length).fill(false);
+
+  for (const match of text.matchAll(COMPACT_MARKER)) {
+    const start = match.index ?? 0;
+    const season = match[1];
+    const episode = match[2];
+    if (season === undefined || episode === undefined) continue;
+
+    let overlaps = false;
+    for (let i = start; i < start + match[0].length; i += 1) {
+      if (occupied[i]) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps) continue;
+
+    const compact = `S${season}E${episode}`;
+    if (compact.length > match[0].length) continue;
+
+    for (let i = 0; i < compact.length; i += 1) {
+      chars[start + i] = compact[i] as string;
+      occupied[start + i] = true;
+    }
+    for (let i = start + compact.length; i < start + match[0].length; i += 1) {
+      chars[i] = ' ';
+      occupied[i] = true;
+    }
+  }
+
+  return chars.join('');
+}
+
+/** 匹配压缩后的紧凑标记 S02E01。 */
+const COMPACT_PATTERN = /S(\d{1,2})E(\d{1,4})(?![0-9])/gi;
+
+/**
+ * 把紧凑标记覆盖的整段文字替换成等长空格。
+ * 用于区间识别：否则 S2E12 里的 2 仍可能被区间规则读成起点，
+ * 把「第 12 集」当成「第 2 到第 12 集」的合集。
+ */
+function maskCombinedSpans(compacted: string): string {
+  const chars = [...compacted];
+  for (const match of compacted.matchAll(COMPACT_PATTERN)) {
+    const start = match.index ?? 0;
+    for (let i = start; i < start + match[0].length && i < chars.length; i += 1) {
+      if (chars[i] !== '\n') chars[i] = ' ';
+    }
+  }
+  return chars.join('');
+}
+
+/** 从紧凑标记 S02E01 里取出集号。 */
+function collectCombinedCandidates(compacted: string): EpisodeCandidate[] {
+  const candidates: EpisodeCandidate[] = [];
+  for (const match of compacted.matchAll(COMPACT_PATTERN)) {
+    const episode = match[2];
+    if (episode === undefined) continue;
+    const index = (match.index ?? 0) + match[0].length - episode.length;
+    const value = Number(episode);
+    if (Number.isFinite(value) && value >= 0 && value <= 3000) {
+      candidates.push({ number: value, index, specificity: 110 });
+    }
+  }
+  return candidates;
+}
+
+/**
  * 集号候选。specificity 越大越可信，同一位置取可信度最高的。
  * 位置更靠前的候选优先，因为集号一般出现在标题主体里而不是尾部参数中。
  */
-function collectCandidates(text: string): EpisodeCandidate[] {
+function collectCandidates(compacted: string, text: string): EpisodeCandidate[] {
   const candidates: EpisodeCandidate[] = [];
   const push = (number: number, index: number, specificity: number, rangeEnd?: number) => {
     if (!Number.isFinite(number) || number < 0 || number > 3000) return;
     candidates.push({ number, index, specificity, rangeEnd });
   };
+
+  // 组合标记最先收集，可信度最高。
+  // 注意要从 compacted 里取，而不是从已经抹掉标记的 text 里取。
+  candidates.push(...collectCombinedCandidates(compacted));
 
   // 中文「第01话 / 第01集 / 第01話」，最可靠
   for (const match of text.matchAll(/第\s*(\d{1,4})\s*(?:话|話|集|回|話数|话数)/g)) {
@@ -112,7 +214,9 @@ function collectCandidates(text: string): EpisodeCandidate[] {
   }
 
   // 方括号包起来的集号： [01] [12] [01v2]
-  for (const match of text.matchAll(/[[【]\s*(\d{1,3})(?:\s*[vV]\d)?\s*[\]】]/g)) {
+  // 必须用 lookahead 排掉画质参数，否则 "[1080p]" "[720p]" "[10bit]" 会被
+  // 当成集号 —— 真实案例：分辨率写在方括号里的发布会被算出「第 1080 集」。
+  for (const match of text.matchAll(/[[【]\s*(\d{1,3})(?:\s*[vV]\d)?\s*[\]】](?![A-Za-z0-9])/g)) {
     push(Number(match[1]), match.index ?? 0, 90);
   }
 
@@ -122,6 +226,16 @@ function collectCandidates(text: string): EpisodeCandidate[] {
   }
   for (const match of text.matchAll(/#(\d{1,4})(?![0-9])/g)) {
     push(Number(match[1]), match.index ?? 0, 80);
+  }
+
+  // 裸数字 + 版本号后缀： "Frieren - 05v2" / "05 v2"
+  // 必须先于下面的通用裸数字规则处理，因为 v2 紧贴数字会让通用规则匹配不上。
+  for (const match of text.matchAll(/(?:^|[\s._\-–—~/\\])(\d{1,4})\s*[vV]\d(?![0-9])/g)) {
+    const digits = match[1];
+    if (!digits) continue;
+    // 集号在匹配串里的偏移：匹配串以分隔符开头，分隔符长度为 1
+    const absolute = (match.index ?? 0) + 1;
+    push(Number(digits), absolute, 55);
   }
 
   // 空格/点/下划线/短横线/斜杠分隔的裸数字，要求两边是边界，
@@ -217,9 +331,14 @@ export function extractGroup(name: string): string | null {
 
 export function parseReleaseName(rawName: string): ParsedReleaseName {
   const name = rawName.normalize('NFKC');
-  const text = normalizeDigits(name);
-  const ranges = collectRanges(text);
-  const candidates = collectCandidates(text);
+  // 先把 Season 2 Episode 5 这类写法压成 S2E5（长度不变），
+  // 后面所有规则只需要面对一种形态。
+  // 若不做这一步，"Season 2 - Episode 12" 会被区间规则读成「第 2 到第 12 集」
+  // 的合集 —— 这是真实发生过的误判：给第 12 集找种时下到了整季。
+  const text = compactSeasonEpisode(normalizeDigits(name));
+  const masked = maskCombinedSpans(text);
+  const ranges = collectRanges(masked);
+  const candidates = collectCandidates(text, masked);
 
   const isSpecial = SPECIAL_PATTERN.test(text);
   const containerMatch = CONTAINER_PATTERN.exec(text);

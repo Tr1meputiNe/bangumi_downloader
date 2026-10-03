@@ -53,13 +53,34 @@ jobs:
       - name: Smoke test the built exe
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $exe = "release/windows/bangumi-downloader.exe"
           if (-not (Test-Path $exe)) { throw "找不到构建产物 $exe" }
-          $version = & $exe --version
+
+          $version = (& $exe --version | Out-String)
           Write-Host "版本输出：$version"
           if ($LASTEXITCODE -ne 0) { throw "exe --version 退出码 $LASTEXITCODE" }
-          $help = & $exe --help
-          if ($help -notmatch 'bangumi-downloader') { throw "exe --help 输出异常" }
+          if ($version -notmatch '\d+\.\d+\.\d+') { throw "exe --version 没有输出版本号：$version" }
+
+          # 只断言 ASCII 片段：中文在 CI 控制台里受代码页影响，断言它容易假失败
+          $help = (& $exe --help | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "exe --help 退出码 $LASTEXITCODE" }
+          if ($help -notmatch '--dry-run' -or $help -notmatch '--config') {
+            throw "exe --help 输出不完整：`n$help"
+          }
+
+          # 配置文件应当能正常生成
+          $tmp = Join-Path $env:RUNNER_TEMP "bdl-smoke"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Push-Location $tmp
+          try {
+            & $exe config | Out-Null
+            if (-not (Test-Path "config.json")) { throw "exe config 没有生成 config.json" }
+            Write-Host "配置文件已生成"
+          } finally {
+            Pop-Location
+          }
+
           Write-Host "冒烟测试通过"
 
       - name: Create release archive

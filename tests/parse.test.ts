@@ -98,6 +98,62 @@ describe('parseReleaseName', () => {
   });
 });
 
+/**
+ * 这一组都是「真机验证时踩出来的」回归用例：
+ * 用真实 qBittorrent 跑一轮时发现给第 2 集下到了第 1 集，
+ * 才有下面这些断言。删掉它们之前请先想清楚。
+ */
+describe('SxxEyy 组合标记（回归）', () => {
+  it('不会把 S02E01 里的季度号当成集号', () => {
+    const parsed = parseReleaseName('The.Ramparts.of.Ice.S02E01.Clouds.and.Rain.1080p.NF.WEB-DL.AAC2.0.H.264');
+    expect(parsed.episodes).toEqual([1]);
+    expect(parsed.season).toBe(2);
+  });
+
+  it('识别各种 SxxEyy 写法', () => {
+    expect(parseReleaseName('[G] Frieren S02E05 [1080p]').episodes).toEqual([5]);
+    expect(parseReleaseName('[G] Frieren s2e13 [1080p]').episodes).toEqual([13]);
+    expect(parseReleaseName('[G] Frieren S02.E01 [1080p]').episodes).toEqual([1]);
+    expect(parseReleaseName('[G] Frieren S02 EP05 [1080p]').episodes).toEqual([5]);
+  });
+
+  it('识别 Season N Episode M 的带空格写法', () => {
+    expect(parseReleaseName('[G] Frieren Season 2 Episode 5 [1080p]').episodes).toEqual([5]);
+    expect(parseReleaseName('[G] Frieren Season 2 Ep 7 [1080p]').episodes).toEqual([7]);
+    expect(parseReleaseName('[G] Frieren Season 2, Episode 9 [1080p]').episodes).toEqual([9]);
+  });
+
+  it('不会把 "Season 2 - Episode 12" 误读成 2-12 的合集', () => {
+    const parsed = parseReleaseName('[G] Frieren Season 2 - Episode 12 [1080p]');
+    expect(parsed.kind).toBe('single');
+    expect(parsed.episodes).toEqual([12]);
+    expect(parsed.episodeFrom).toBeNull();
+  });
+
+  it('不会把方括号里的分辨率当成集号', () => {
+    const parsed = parseReleaseName('[Group] Frieren Season 2 Episode 5 [1080p]');
+    expect(parsed.episodes).not.toContain(1080);
+    expect(parseReleaseName('[Group] Frieren [1080p]').episodes).not.toContain(1080);
+    expect(parseReleaseName('[Group] Frieren [720p]').episodes).not.toContain(720);
+  });
+
+  it('仍然能识别写在方括号里的真正集号', () => {
+    expect(parseReleaseName('[Group][Frieren][01][1080p][CHS].mkv').episodes).toEqual([1]);
+    expect(parseReleaseName('【悠哈璃羽字幕社】[葬送的芙莉莲 第二季][37][1080p HEVC][CHS].mkv').episodes).toContain(37);
+  });
+
+  it('识别带版本号的集号 05v2', () => {
+    expect(parseReleaseName('[Group] Frieren - 05v2 [1080p][10bit].mkv').episodes).toEqual([5]);
+  });
+
+  it('保留正常的合集区间识别', () => {
+    const parsed = parseReleaseName('[Group] Frieren S01 29-38 [简繁字幕] BDrip 1080p');
+    expect(parsed.kind).toBe('batch');
+    expect(parsed.episodeFrom).toBe(29);
+    expect(parsed.episodeTo).toBe(38);
+  });
+});
+
 describe('seasonCompatible', () => {
   it('发布未写季度时一律放行', () => {
     const parsed = parseReleaseName('[Group] Frieren - 05 [1080p].mkv');
