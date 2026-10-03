@@ -16,7 +16,9 @@ if (-not (Test-Path $config)) {
     exit 1
 }
 
-$action = New-ScheduledTaskAction -Execute $exe -Argument 'run' -WorkingDirectory $root
+# 用清单模式（auto）而不是 run：run 依赖本机 Watch Planner 服务，
+# 而那台服务不一定在这台机器上；清单模式完全本机闭环。
+$action = New-ScheduledTaskAction -Execute $exe -Argument 'auto' -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -42,5 +44,5 @@ if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) 
 
 Write-Host "已注册开机自启计划任务：$taskName" -ForegroundColor Green
 Write-Host "工作目录：$root"
-Write-Host "下次登录 Windows 后会自动在后台开始轮询并下载。"
+Write-Host "下次登录 Windows 后会自动按 watchlist.json 轮询并下载新集。"
 Write-Host "需要取消时，运行「卸载开机自启.cmd」。"

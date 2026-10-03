@@ -34,9 +34,33 @@ export type ScoreWeights = {
   batch: number;
 };
 
+export type DownloadBackendName = 'builtin' | 'qbittorrent';
+
 export type DownloadPreference = {
-  /** false 时只挑选并记录，不推送到 qBittorrent。 */
+  /** false 时只挑选并记录，不真正下载。 */
   enabled?: boolean;
+  /**
+   * 用哪个下载后端：
+   *   builtin     项目自带的 BitTorrent 引擎，零外部依赖（默认）
+   *   qbittorrent 推送给独立的 qBittorrent 程序
+   */
+  backend?: DownloadBackendName;
+  /** builtin 后端的下载目录。留空则回退到 qbittorrent.savePath。 */
+  savePath?: string;
+  /** builtin 后端单个种子的总超时（毫秒），默认 1 小时。 */
+  timeoutMs?: number;
+  /** builtin 后端多久没有任何分片完成就判定卡死（毫秒），默认 3 分钟。 */
+  stallTimeoutMs?: number;
+  /** download 命令探活几条候选（按真实做种数挑最可能下得动的）。默认 10。 */
+  probeCandidates?: number;
+  /** 每条候选试跑多少秒来判断「下不下得动」。默认 90。 */
+  trialSeconds?: number;
+  /** 试跑期最低吞吐（KB/s），低于它就换下一条。默认 40。 */
+  minThroughputKBps?: number;
+  /** 最多试几条候选。默认 8。 */
+  maxAttempts?: number;
+  /** 一次 download 的总时间预算（分钟）。默认 360。 */
+  budgetMinutes?: number;
   /** 单个番剧单轮最多推送多少集。 */
   maxEpisodesPerSubjectPerRun?: number;
   /** 单轮总共最多推送多少个种子。 */
@@ -151,6 +175,15 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
   },
   download: {
     enabled: true,
+    backend: 'builtin',
+    savePath: '',
+    timeoutMs: 60 * 60_000,
+    stallTimeoutMs: 3 * 60_000,
+    probeCandidates: 10,
+    trialSeconds: 90,
+    minThroughputKBps: 30,
+    maxAttempts: 8,
+    budgetMinutes: 360,
     maxEpisodesPerSubjectPerRun: 3,
     maxTorrentsPerRun: 10,
     onlyAiredAfter: null,

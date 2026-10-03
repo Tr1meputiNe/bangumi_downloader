@@ -71,17 +71,42 @@ export function bdecode(buffer: Uint8Array): BencodeValue {
 }
 
 /**
+ * 解析 .torrent 并额外给出 info 字典的**原始字节**。
+ *
+ * 下载引擎需要这份原始字节：算 infohash、算每个 piece 的 SHA1、
+ * 以及把文件清单交给别的客户端时，都必须逐字节一致。
+ * 解析成对象再编码回去会因为键序、整数规范化的差异而对不上。
+ */
+export function bdecodeTorrent(
+  buffer: Uint8Array
+): { root: BencodeValue; info: BencodeValue; infoBytes: Uint8Array } | null {
+  try {
+    const { value: root } = parseAt(buffer, 0);
+    if (typeof root !== 'object' || root === null || Array.isArray(root) || root instanceof Uint8Array) return null;
+    const infoStart = locateInfoDict(buffer);
+    if (infoStart < 0) return null;
+    const parsed = parseAt(buffer, infoStart);
+    return { root, info: parsed.value, infoBytes: buffer.subarray(infoStart, parsed.next) };
+  } catch {
+    return null;
+  }
+}
+
+/** 在 .torrent 顶层定位 "4:infod"，返回 info 字典 'd' 所在下标；找不到返回 -1。 */
+function locateInfoDict(buffer: Uint8Array): number {
+  const index = indexOfBytes(buffer, new TextEncoder().encode('4:infod'));
+  return index < 0 ? -1 : index + '4:info'.length;
+}
+
+/**
  * 计算 .torrent 文件的 infohash：对整个 info 字典（含首尾标记）做 SHA1。
  * 返回 40 位小写 hex；文件不合法时返回 null。
  */
 export function torrentInfoHash(buffer: Uint8Array): string | null {
   try {
     // 顶层必须是字典，定位到 "4:infod" 后重新解析该位置以拿到纯净的 info 切片。
-    const needle = new TextEncoder().encode('4:infod');
-    const index = indexOfBytes(buffer, needle);
-    if (index < 0) return null;
-    const infoStart = index + '4:info'.length;
-    if (buffer[infoStart] !== 0x64) return null;
+    const infoStart = locateInfoDict(buffer);
+    if (infoStart < 0 || buffer[infoStart] !== 0x64) return null;
     const { next } = parseAt(buffer, infoStart);
     const infoBytes = buffer.subarray(infoStart, next);
     return createHash('sha1').update(infoBytes).digest('hex');

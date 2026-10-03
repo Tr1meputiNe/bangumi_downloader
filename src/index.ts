@@ -5,6 +5,10 @@ import { QbittorrentClient } from './qbittorrent/client.js';
 import { StateStore } from './state/store.js';
 import { runSync, type DownloadMode, type SyncReport } from './core/sync.js';
 import { searchAndRank } from './core/search.js';
+import { dispatchDownload, resolveBackend } from './core/dispatch.js';
+import { downloadWithFallback } from './core/fallback.js';
+import { runAuto } from './core/auto.js';
+import { ensureWatchlistExample, watchlistPath } from './core/watchlist.js';
 import { searchAll } from './trackers/index.js';
 import { startWebServer } from './web/server.js';
 import { notify } from './notify/index.js';
@@ -27,12 +31,18 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   sync          执行一轮自动追番：抓取未看集数 → 搜种 → 选种 → 推送
   run           守护模式，按 intervalMinutes 定时执行 sync（Ctrl+C 退出）
   check         检查配置、Planner、片源与 qBittorrent 的连通性
+  download      搜索某个关键词，挑出最合适的资源并真正下载（默认下全集）
+  auto          按 watchlist.json 自动追番：有新集就下（适合放计划任务里长期跑）
   preview       只搜索并打印某部番剧的候选排名（排错用）
   config        打印当前生效的配置
 
 选项：
   --config <路径>     指定配置文件，默认 ./config.json
-  --query <关键词>    serve/search/preview 使用的搜索关键词
+  --query <关键词>    serve/search/preview/download 使用的搜索关键词
+  --episodes <集号>   download 只下这些集，例如 "1-13" 或 "3,5,7"；默认尽量下全集
+  --save-path <目录>  download 的保存目录，覆盖 config.json 里的设置
+  --watchlist <文件>  auto 使用的追番清单，默认与 config.json 同目录的 watchlist.json
+  --interval <分钟>   auto --daemon 的轮询间隔，默认取 config.intervalMinutes
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -43,12 +53,13 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
 示例：
   bangumi-downloader serve                     启动 Web 界面（推荐）
   bangumi-downloader search --query "芙莉莲"    命令行搜索
+  bangumi-downloader download --query "芙莉莲"  直接下载整季
   bangumi-downloader check
   bangumi-downloader sync --dry-run
   bangumi-downloader run
 `;
 
-type Command = 'serve' | 'search' | 'sync' | 'run' | 'check' | 'preview' | 'config' | 'help';
+type Command = 'serve' | 'search' | 'sync' | 'run' | 'check' | 'preview' | 'config' | 'download' | 'auto' | 'help';
 
 export function resolveCommand(raw: string | undefined): Command {
   switch (raw) {
@@ -71,6 +82,14 @@ export function resolveCommand(raw: string | undefined): Command {
       return 'preview';
     case 'config':
       return 'config';
+    case 'download':
+    case 'get':
+    case 'dl':
+      return 'download';
+    case 'auto':
+    case 'watch':
+    case 'daemon':
+      return 'auto';
     default:
       return 'help';
   }
@@ -267,6 +286,109 @@ async function cmdPreview(config: AppConfig, query: string): Promise<number> {
   return 0;
 }
 
+export type DownloadCommandOptions = {
+  query: string;
+  /** 只要这些集；留空表示「尽量拿全集」。 */
+  episodes: number[];
+  /** 覆盖下载目录。 */
+  savePath?: string;
+  dryRun: boolean;
+};
+
+/**
+ * 手动下载一个关键词对应的资源。
+ *
+ * 「全集」的判定：优先挑发布名里写明是合集（kind === 'batch'）且覆盖集数最多的一条；
+ * 没有合集就退回分数最高的单集。这跟自动追番的「按缺失集号严格匹配」是两回事 ——
+ * 这里用户要的是「把这一季拉下来」。
+ */
+async function cmdDownload(config: AppConfig, options: DownloadCommandOptions): Promise<number> {
+  if (!options.query) {
+    log.error('download 需要 --query 指定搜索关键词');
+    return 2;
+  }
+
+  const outcome = await searchAndRank({
+    query: options.query,
+    config,
+    mode: 'manual',
+    resolveMikanMagnet: false
+  });
+
+  log.info(`关键词：${outcome.queries.join(' / ')}`);
+  log.info(`去重后 ${outcome.ranked.length} 条候选`);
+  for (const item of outcome.errors) {
+    log.warn(`片源 ${item.tracker} 失败：${item.reason}`);
+  }
+
+  const explicit = options.episodes.length > 0;
+  const backend = resolveBackend(config);
+  const savePath = options.savePath || config.download.savePath || config.qbittorrent.savePath;
+
+  if (options.dryRun || config.download.enabled === false) {
+    log.info(`下载后端：${backend}${savePath ? `｜保存到 ${savePath}` : ''}`);
+    log.info('[dry-run] 只挑选不下载。去掉 --dry-run（并把 download.enabled 设为 true）才会真正下载。');
+    return 0;
+  }
+
+  if (!savePath) {
+    log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
+    return 2;
+  }
+
+  // qBittorrent 后端是「推送」语义，不适合试跑降级；这里仍走原来的一次性推送
+  if (backend === 'qbittorrent') {
+    const candidate = outcome.ranked.find((item) => !item.rejected && (item.result.magnet || item.result.torrentUrl));
+    if (!candidate) {
+      log.error('没有找到可下载的候选');
+      return 1;
+    }
+    log.info(`推送到 qBittorrent：${candidate.result.title}`);
+    const pushed = await dispatchDownload(
+      { config, qbittorrent: new QbittorrentClient(config.qbittorrent) },
+      {
+        title: candidate.result.title,
+        magnet: candidate.result.magnet,
+        torrentUrl: candidate.result.torrentUrl,
+        sizeBytes: candidate.result.sizeBytes,
+        tracker: candidate.result.tracker,
+        episodes: options.episodes
+      }
+    );
+    log.info(`已推送：${pushed.infoHash}`);
+    return 0;
+  }
+
+  /*
+   * 内置引擎：打分高不等于下得动，所以不锁定单条候选，而是按
+   * 「整季 → 无集号整季 → 单集」的顺序逐条实测，谁有速度就下谁。
+   */
+  log.info(`下载后端：builtin｜保存到 ${savePath}`);
+  log.info(`将从 ${Math.min(outcome.ranked.length, 8)} 条候选里逐条实测吞吐，挑能下动的`);
+
+  const result = await downloadWithFallback({
+    candidates: outcome.ranked,
+    config,
+    episodes: options.episodes,
+    savePath,
+    trialSeconds: config.download.trialSeconds ?? 90,
+    minThroughput: (config.download.minThroughputKBps ?? 40) * 1024,
+    maxAttempts: config.download.maxAttempts ?? 8,
+    budgetMs: (config.download.budgetMinutes ?? 360) * 60_000,
+    onLog: (message) => log.debug(message)
+  });
+
+  log.info(
+    `${result.completed ? '下载完成' : '部分完成'}：${result.files.length} 个文件，` +
+      `共 ${formatSize(result.bytesWritten)}`
+  );
+  for (const file of result.files.slice(0, 40)) log.info(`  · ${file}`);
+  if (!result.completed) {
+    log.warn('没能完整下完（候选吞吐都不够）。已保留已下载的部分，稍后可以重跑续传。');
+  }
+  return result.completed ? 0 : 1;
+}
+
 function printRanked(ranked: readonly ScoredCandidate[], total: number): void {
   if (ranked.length === 0) {
     log.warn('没有搜到任何结果');
@@ -381,6 +503,97 @@ async function cmdRun(config: AppConfig, mode: DownloadMode): Promise<number> {
   return 0;
 }
 
+/**
+ * 基于本机清单的自动追番。
+ *
+ * 与 sync/run 的区别：那两条路依赖本机 Watch Planner 服务，
+ * 这条只看同目录的 watchlist.json，不需要任何外部服务，适合放计划任务长期跑。
+ */
+async function cmdAuto(
+  config: AppConfig,
+  configPath: string,
+  options: { watchlistFile?: string; daemon: boolean; intervalMinutes?: number; dryRun: boolean }
+): Promise<number> {
+  const path = options.watchlistFile ?? watchlistPath(configPath);
+  if (ensureWatchlistExample(path)) {
+    log.info(`已生成追番清单模板：${path}`);
+    log.info('把要追的番名填进 entries 后重新运行本命令。');
+    return 0;
+  }
+
+  const intervalMinutes = options.intervalMinutes ?? config.intervalMinutes ?? 30;
+
+  const runOnceAuto = async (): Promise<number> => {
+    const report = await runAuto({
+      config,
+      configPath,
+      dryRun: options.dryRun,
+      watchlistFile: options.watchlistFile
+    });
+    log.info(
+      `本轮结束：清单 ${report.subjects} 条，检查 ${report.checked} 条，` +
+        `新下载 ${report.downloaded.length} 条，跳过 ${report.skipped.length} 条`
+    );
+    for (const item of report.downloaded) {
+      log.info(`  + 《${item.query}》第${item.episodes.join('/')}集 → ${item.files} 个文件${item.completed ? '' : '（未下完）'}`);
+    }
+    return 0;
+  };
+
+  if (!options.daemon) return await runOnceAuto();
+
+  log.info(`自动追番守护模式：每 ${intervalMinutes} 分钟检查一次（Ctrl+C 退出）`);
+  let running = true;
+  const stop = () => {
+    running = false;
+    log.info('收到退出信号，本轮到结束就停');
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  while (running) {
+    await runOnceAuto();
+    if (!running) break;
+    log.info(`下一轮在 ${intervalMinutes} 分钟后`);
+    const deadline = Date.now() + intervalMinutes * 60_000;
+    while (running && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+    }
+  }
+
+  log.info('已退出守护模式');
+  return 0;
+}
+
+/**
+ * 解析 --episodes 的取值，支持 "1-13"、"3,5,7"、"1-3,7,9-11" 三种写法。
+ * 空字符串返回空数组，表示「不限制、尽量下全集」。
+ */
+export function parseEpisodeSpec(spec: string | undefined): number[] {
+  if (!spec) return [];
+  const result = new Set<number>();
+
+  for (const part of spec.split(',')) {
+    const token = part.trim();
+    if (token === '') continue;
+
+    const range = /^(\d+)\s*-\s*(\d+)$/.exec(token);
+    if (range) {
+      const from = Number.parseInt(range[1] as string, 10);
+      const to = Number.parseInt(range[2] as string, 10);
+      // 上限兜底，避免写出 "1-100000" 这种把内存吃掉的输入
+      if (!Number.isFinite(from) || !Number.isFinite(to) || to - from > 5000) continue;
+      for (let episode = Math.min(from, to); episode <= Math.max(from, to); episode += 1) result.add(episode);
+      continue;
+    }
+
+    const single = Number.parseInt(token, 10);
+    if (Number.isFinite(single) && single > 0) result.add(single);
+  }
+
+  return [...result].sort((a, b) => a - b);
+}
+
 export async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -390,6 +603,11 @@ export async function main(argv: string[]): Promise<number> {
       'dry-run': { type: 'boolean', default: false },
       once: { type: 'boolean', default: false },
       query: { type: 'string' },
+      episodes: { type: 'string' },
+      'save-path': { type: 'string' },
+      watchlist: { type: 'string' },
+      daemon: { type: 'boolean', default: false },
+      interval: { type: 'string' },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -434,6 +652,20 @@ export async function main(argv: string[]): Promise<number> {
       return cmdSearch(config, values.query ?? positionals[1] ?? '');
     case 'preview':
       return cmdPreview(config, values.query ?? positionals[1] ?? '');
+    case 'download':
+      return cmdDownload(config, {
+        query: values.query ?? positionals[1] ?? '',
+        episodes: parseEpisodeSpec(values.episodes),
+        savePath: values['save-path'],
+        dryRun: values['dry-run']
+      });
+    case 'auto':
+      return cmdAuto(config, configPath, {
+        watchlistFile: values.watchlist,
+        daemon: values.daemon,
+        intervalMinutes: values.interval !== undefined ? Number(values.interval) : undefined,
+        dryRun: values['dry-run'] || config.download.enabled === false
+      });
     case 'run':
       return cmdRun(config, mode);
     case 'sync':

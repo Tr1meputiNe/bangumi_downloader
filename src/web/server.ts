@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import type { AppConfig } from '../config.js';
 import { QbittorrentClient } from '../qbittorrent/client.js';
 import { searchAndRank } from '../core/search.js';
-import { pushRelease } from '../core/push.js';
+import { dispatchDownload } from '../core/dispatch.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -167,14 +167,17 @@ async function handleAdd(deps: WebDeps, request: IncomingMessage, response: Serv
     }
 
     try {
-      const pushed = await pushRelease(deps.qbittorrent, deps.config, {
-        title,
-        magnet,
-        torrentUrl,
-        sizeBytes,
-        tracker,
-        episodes
-      });
+      const pushed = await dispatchDownload(
+        { config: deps.config, qbittorrent: deps.qbittorrent },
+        {
+          title,
+          magnet,
+          torrentUrl,
+          sizeBytes,
+          tracker,
+          episodes
+        }
+      );
       results.push({ title, ok: true, infoHash: pushed.infoHash, fileCount: pushed.fileCount });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

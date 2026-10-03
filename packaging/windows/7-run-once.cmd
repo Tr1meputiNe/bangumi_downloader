@@ -9,8 +9,8 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo 执行一轮真实下载...
+echo 按 watchlist.json 检查一遍新集并下载...
 echo.
-"%~dp0bangumi-downloader.exe" sync
+"%~dp0bangumi-downloader.exe" auto
 echo.
 pause

@@ -21,6 +21,14 @@ const blobPath = join(seaDir, 'sea-prep.blob');
 const executablePath = join(releaseDir, `bangumi-downloader${extension}`);
 const postjectCli = join(root, 'node_modules', 'postject', 'dist', 'cli.js');
 
+/*
+ * 重新构建会把产物目录整个删掉。用户可能已经把 config.json 放在那儿改好了，
+ * 直接删掉等于悄悄清空他的配置（下载目录、后端选择、片源开关全没了），
+ * 所以先备份、构建完再放回去。
+ */
+const existingConfigPath = join(releaseDir, 'config.json');
+const savedConfig = existsSync(existingConfigPath) ? readFileSync(existingConfigPath) : null;
+
 rmSync(releaseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 mkdirSync(releaseDir, { recursive: true });
 mkdirSync(seaDir, { recursive: true });
@@ -131,6 +139,11 @@ if (process.platform === 'win32') {
 // 这些是跨平台的文本资源，错误应该在本机就暴露，而不是等用户双击才发现
 // —— uninstall-startup.cmd 装错内容那件事就是这么溜进发行包的。
 verifyPackaging(join(root, 'packaging', 'windows'));
+
+if (savedConfig) {
+  writeFileSync(existingConfigPath, savedConfig);
+  console.log('已保留产物目录里原有的 config.json（重新构建不会清掉你的配置）');
+}
 
 console.log(`产物目录：${releaseDir}`);
 console.log(`可执行文件：${executablePath}`);

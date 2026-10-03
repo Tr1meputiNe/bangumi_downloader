@@ -128,7 +128,7 @@ export async function pushRelease(
   };
 }
 
-async function downloadTorrentBytes(url: string, timeoutMs: number): Promise<Uint8Array> {
+export async function downloadTorrentBytes(url: string, timeoutMs: number): Promise<Uint8Array> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
