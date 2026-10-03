@@ -54,7 +54,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = "release/windows/bangumi-downloader.exe"
+          # 必须用绝对路径：后面会 Push-Location 到临时目录，相对路径会失效
+          $exe = (Resolve-Path "release/windows/bangumi-downloader.exe").Path
           if (-not (Test-Path $exe)) { throw "找不到构建产物 $exe" }
 
           $version = (& $exe --version | Out-String)
@@ -68,8 +69,9 @@ jobs:
           if ($help -notmatch '--dry-run' -or $help -notmatch '--config') {
             throw "exe --help 输出不完整：`n$help"
           }
+          Write-Host "help 输出正常"
 
-          # 配置文件应当能正常生成
+          # 在没有 config.json 的干净目录里应当自动生成一份
           $tmp = Join-Path $env:RUNNER_TEMP "bdl-smoke"
           New-Item -ItemType Directory -Force -Path $tmp | Out-Null
           Push-Location $tmp
