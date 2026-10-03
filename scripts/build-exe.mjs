@@ -6,7 +6,7 @@
  * 目标机器连 Node.js 都不用装。
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -112,6 +112,7 @@ copyFileSync(join(root, 'config.example.json'), join(releaseDir, 'config.example
 copyFileSync(join(root, 'README.md'), join(releaseDir, 'README.md'));
 if (process.platform === 'win32') {
   cpSync(join(root, 'packaging', 'windows'), releaseDir, { recursive: true });
+  normalizeLineEndings(releaseDir);
 }
 
 console.log(`产物目录：${releaseDir}`);
@@ -119,6 +120,35 @@ console.log(`可执行文件：${executablePath}`);
 
 function run(command, args, cwd = root) {
   execFileSync(command, args, { cwd, stdio: 'inherit' });
+}
+
+/**
+ * 把 .cmd / .ps1 统一转成 CRLF。
+ *
+ * 仓库里这些文件是 LF（便于在 macOS/Linux 上编辑），但 Windows 的 cmd.exe
+ * 在解析带括号的多行块时对纯 LF 支持不可靠，记事本看起来也会挤成一行。
+ * 所以在打包这一步统一转换，而不是把 CRLF 提交进仓库。
+ */
+function normalizeLineEndings(directory) {
+  let converted = 0;
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.(cmd|bat|ps1)$/i.test(entry.name)) continue;
+      const original = readFileSync(full, 'utf8');
+      const normalized = original.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+      if (normalized !== original) {
+        writeFileSync(full, normalized, 'utf8');
+        converted += 1;
+      }
+    }
+  };
+  walk(directory);
+  console.log(`已把 ${converted} 个脚本转换为 CRLF 换行`);
 }
 
 /** 判断一个 Mach-O 是否为含多架构的 fat 二进制。 */
