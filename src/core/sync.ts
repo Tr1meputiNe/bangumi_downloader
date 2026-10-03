@@ -328,14 +328,21 @@ async function pushTorrent(
     paused: qbittorrent.paused
   };
 
-  // 单个文件覆盖全集数时不需要挑文件
-  const needsSelection = result.sizeBytes !== null && result.sizeBytes > 4 * 1024 ** 3;
+  // 判断是否需要「先拿种子文件清单再选择性下载」。
+  //
+  // 触发条件不是「体积大」而是「可能是多集种子」：只有 .torrent 直链（磁力没法在添加前
+  // 拿到文件列表）且（已知体积较大 或 发布名显示是合集）时才值得多花一次种子下载。
+  // 拿到清单后如果发现它其实只覆盖需要的集，就整包下载，不会白白多这一步。
+  const knownBatch = plan.candidate.parsed.kind === 'batch';
+  const largeEnoughToWorry = result.sizeBytes !== null && result.sizeBytes > 2 * 1024 ** 3;
+  const needsSelection = Boolean(result.torrentUrl) && (knownBatch || largeEnoughToWorry);
   let meta: TorrentMeta | null = null;
   let metaBytes: Uint8Array | null = null;
 
-  if (needsSelection && result.torrentUrl) {
+  if (needsSelection) {
     // 只下载一次种子文件：既用来解析文件清单，也直接喂给 qBittorrent
-    metaBytes = await downloadTorrentBytes(result.torrentUrl, trackers.timeoutMs ?? 15000).catch(() => null);
+    const torrentUrl = result.torrentUrl as string;
+    metaBytes = await downloadTorrentBytes(torrentUrl, trackers.timeoutMs ?? 15000).catch(() => null);
     if (metaBytes) meta = parseTorrent(metaBytes);
   }
 

@@ -124,8 +124,10 @@ function collectCandidates(text: string): EpisodeCandidate[] {
     push(Number(match[1]), match.index ?? 0, 80);
   }
 
-  // 空格/点/下划线/短横线分隔的裸数字，要求两边是边界，避免匹配到 1080p、x265 等
-  for (const match of text.matchAll(/(?:^|[\s._\-–—~])(\d{1,4})(?=[\s._\-–—~]|$)/g)) {
+  // 空格/点/下划线/短横线/斜杠分隔的裸数字，要求两边是边界，
+  // 避免把 1080p、x265 这类参数当成集号。
+  // 斜杠必须算分隔符：种子内部的路径形如 "Frieren/[Group] 01.mkv"。
+  for (const match of text.matchAll(/(?:^|[\s._\-–—~/\\])(\d{1,4})(?=[\s._\-–—~/\\]|$)/g)) {
     const digits = match[1];
     if (!digits) continue;
     const absolute = (match.index ?? 0) + match[0].length - digits.length;
