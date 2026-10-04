@@ -50,9 +50,15 @@ echo "== 恢复计划任务并启动 =="
 ssh -o BatchMode=yes "$HOST" "schtasks /Change /TN BangumiDownloader-GUI /ENABLE >nul && schtasks /Change /TN BangumiDownloader /ENABLE >nul && schtasks /Run /TN BangumiDownloader-GUI >nul && echo ok"
 
 echo "== 确认服务 =="
+# 注意：界面绑的是 Tailscale 地址（不是 127.0.0.1，回环刻意不服务），
+# 所以健康检查要从**这边**用那个地址去问；在那台机器上 curl 127.0.0.1
+# 永远连不上，会把成功当成失败。地址不对就设 BD_URL 覆盖。
+URL="${BD_URL:-http://100.126.5.18:3778}/api/status"
+
 sleep 8
 for attempt in 1 2 3 4 5; do
-  if status=$(ssh -o BatchMode=yes "$HOST" "curl -s -m 10 http://127.0.0.1:3778/api/status" 2>/dev/null) && [ -n "$status" ]; then
+  if status=$(curl -s -m 10 "$URL" 2>/dev/null) && [ -n "$status" ]; then
+    echo "   $URL"
     echo "   $status"
     exit 0
   fi
@@ -60,5 +66,5 @@ for attempt in 1 2 3 4 5; do
   sleep 5
 done
 
-echo "服务没有在预期时间内响应，去那台机器上看 data/bangumi.log" >&2
+echo "服务没有在预期时间内响应（$URL），去那台机器上看 data/bangumi.log" >&2
 exit 1
