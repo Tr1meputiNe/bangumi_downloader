@@ -240,8 +240,21 @@ export type PlanRow = {
   statusText: string;
 };
 
+export type RunningDownloadView = {
+  title: string;
+  ratio: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  speed: number;
+  peers: number;
+  startedAt: string;
+  updatedAt: string;
+};
+
 export type AutoScheduleView = {
   file: string | null;
+  /** 正在下载的那一条（下载跑在另一个进程里，靠计划文件传递进度）。 */
+  running: RunningDownloadView | null;
   nextCheckAt: string | null;
   nextRefreshAt: string | null;
   nextReason: string;
@@ -350,6 +363,7 @@ export type OverviewResponse = {
     nextReason: string;
     nextCheckText: string;
     windows: number;
+    running: RunningDownloadView | null;
   };
   schedule: ScheduleResponse;
 };

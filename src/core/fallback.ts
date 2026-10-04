@@ -51,6 +51,16 @@ export type FallbackOptions = {
    * 做种多得多的字幕组版本根本没机会被试到。
    */
   resumeSliceMs?: number;
+  /** 下载过程中的进度回调（界面上的「正在下载」用它）。 */
+  onProgress?: (info: {
+    title: string;
+    downloadedBytes: number;
+    totalBytes: number;
+    speed: number;
+    peers: number;
+    piecesDone: number;
+    piecesTotal: number;
+  }) => void;
 };
 
 export type FallbackResult = {
@@ -488,6 +498,15 @@ async function runAttempt(
     onProgress: (progress: DownloadProgress) => {
       latestDownloaded = progress.downloadedBytes;
       bytes = progress.downloadedBytes;
+      options.onProgress?.({
+        title: candidate.result.title,
+        downloadedBytes: progress.downloadedBytes,
+        totalBytes: progress.totalBytes,
+        speed: progress.speed,
+        peers: progress.peers,
+        piecesDone: progress.piecesDone,
+        piecesTotal: progress.piecesTotal
+      });
     }
   });
 

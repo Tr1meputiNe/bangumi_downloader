@@ -280,7 +280,8 @@ async function buildOverview(deps: WebDeps) {
         nextCheckAt: current.state?.nextCheckAt ?? null,
         nextReason: current.state?.nextReason ?? '',
         nextCheckText: current.nextCheckText,
-        windows: current.state?.windows.length ?? 0
+        windows: current.state?.windows.length ?? 0,
+        running: current.state?.running ?? null
       };
     })(),
     schedule
@@ -850,6 +851,8 @@ async function buildWatchlist(deps: WebDeps) {
 
       return {
         file: current.file,
+        /** 正在下载的那一条（另一个进程写的，界面靠它显示进度）。 */
+        running: current.state?.running ?? null,
         nextCheckAt: current.state?.nextCheckAt ?? null,
         nextRefreshAt: current.state?.nextRefreshAt ?? null,
         nextReason: current.state?.nextReason ?? '',

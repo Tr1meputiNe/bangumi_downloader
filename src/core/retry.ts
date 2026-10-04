@@ -46,6 +46,16 @@ export type RetryOptions = {
   refreshCandidates?: () => Promise<readonly ScoredCandidate[]>;
   /** 续传那一份每轮最多先给多久（毫秒）。 */
   resumeSliceMs?: number;
+  /** 下载进度回调（透传给界面）。 */
+  onProgress?: (info: {
+    title: string;
+    downloadedBytes: number;
+    totalBytes: number;
+    speed: number;
+    peers: number;
+    piecesDone: number;
+    piecesTotal: number;
+  }) => void;
 };
 
 export type RetryResult = FallbackResult & {
@@ -89,6 +99,7 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
         minThroughput: (options.config.download.minThroughputKBps ?? 30) * 1024,
         maxAttempts: options.config.download.maxAttempts ?? 8,
         resumeSliceMs: options.resumeSliceMs,
+        onProgress: options.onProgress,
         // 第一轮看有没有历史进度；后面几轮必然要看，因为上一轮就是我们自己下的
         probeExisting: true
       });

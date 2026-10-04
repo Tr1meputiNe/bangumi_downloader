@@ -70,6 +70,28 @@ export type AutoScheduleState = {
   done: AutoDoneRecord[];
   /** 上一次跳过的原因，用来避免每次都往日志里写同一行。 */
   lastSkipReason?: string | null;
+  /**
+   * 正在下载的那一条（没有就是 null）。
+   *
+   * 为什么要写进这个文件：下载跑在**另一个进程**里（计划任务触发的那次），
+   * 而网页界面是常驻的那个进程 —— 不落盘的话，界面上完全看不到进度，
+   * 只能去翻日志。实测用户就是因此以为「一直是 0 MB、没在动」。
+   */
+  running?: RunningDownload | null;
+};
+
+export type RunningDownload = {
+  title: string;
+  /** 0~1。 */
+  ratio: number;
+  /** 已校验通过的字节 / 总字节。 */
+  downloadedBytes: number;
+  totalBytes: number;
+  /** 网络速度（字节/秒，按收到的数据算）。 */
+  speed: number;
+  peers: number;
+  startedAt: string;
+  updatedAt: string;
 };
 
 export const AUTO_SCHEDULE_FILENAME = 'auto-schedule.json';
@@ -90,8 +112,24 @@ export function emptyScheduleState(now: Date): AutoScheduleState {
     windows: [],
     triggers: [],
     done: [],
-    lastSkipReason: null
+    lastSkipReason: null,
+    running: null
   };
+}
+
+/** 把「正在下载」写进计划文件（供界面展示），并返回一个收尾用的函数。 */
+export function publishRunning(path: string, info: RunningDownload): void {
+  const state = loadAutoSchedule(path);
+  state.running = info;
+  saveAutoSchedule(path, state);
+}
+
+/** 下载结束后清掉「正在下载」。 */
+export function clearRunning(path: string): void {
+  const state = loadAutoSchedule(path);
+  if (state.running === null || state.running === undefined) return;
+  state.running = null;
+  saveAutoSchedule(path, state);
 }
 
 export function loadAutoSchedule(path: string, now: Date = new Date()): AutoScheduleState {
@@ -111,7 +149,11 @@ export function loadAutoSchedule(path: string, now: Date = new Date()): AutoSche
       done: Array.isArray(raw.done)
         ? (raw.done as AutoDoneRecord[]).filter((item) => typeof item?.at === 'string' && typeof item?.query === 'string')
         : [],
-      lastSkipReason: typeof raw.lastSkipReason === 'string' ? raw.lastSkipReason : null
+      lastSkipReason: typeof raw.lastSkipReason === 'string' ? raw.lastSkipReason : null,
+      running:
+        raw.running && typeof raw.running === 'object' && typeof (raw.running as RunningDownload).title === 'string'
+          ? (raw.running as RunningDownload)
+          : null
     };
   } catch (error) {
     log.warn(`追番计划文件解析失败，按「没有计划」处理：${(error as Error).message}`);

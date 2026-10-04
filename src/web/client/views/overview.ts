@@ -98,10 +98,15 @@ export function OverviewView() {
                         .map((entry) => `${entry.query} → 第 ${entry.nextEpisode} 集`)
                         .join('、')}
                 </div>
-                <div class="dim small" title=${overview.autoSchedule.nextReason}>
-                  下次检查：${overview.autoSchedule.nextCheckText}
-                  ${overview.autoSchedule.windows > 0 ? ` · 正在等片源 ${overview.autoSchedule.windows} 集` : ''}
-                </div>
+                ${overview.autoSchedule.running
+                  ? html`<div class="small">
+                      正在下载 ${(overview.autoSchedule.running.ratio * 100).toFixed(0)}%
+                      ${overview.autoSchedule.running.speed > 0 ? ` · ${formatSpeed(overview.autoSchedule.running.speed)}` : ''}
+                    </div>`
+                  : html`<div class="dim small" title=${overview.autoSchedule.nextReason}>
+                      下次检查：${overview.autoSchedule.nextCheckText}
+                      ${overview.autoSchedule.windows > 0 ? ` · 正在等片源 ${overview.autoSchedule.windows} 集` : ''}
+                    </div>`}
               `
             : html`<${Spinner} />`}
           <div class="stat-actions">

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'preact/hooks';
 import { html } from '../html.js';
 import { api, type PlanRow, type ScheduleResponse, type WatchEntryView, type WatchlistResponse } from '../api.js';
 import { Badge, Card, Empty, ProgressBar, Spinner, StatusDot } from '../components.js';
-import { compactEpisodes, formatClock, relativeTime, shortenPath } from '../format.js';
+import { compactEpisodes, formatClock, formatSize, formatSpeed, relativeTime, shortenPath } from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
 
 const PLAN_ROW_BADGE: Record<PlanRow['status'], string> = {
@@ -186,7 +186,31 @@ export function PlanView() {
           <button type="button" disabled=${busy} onClick=${() => void runAuto(false)}>立即跑一轮</button>
         `}
       >
-        ${autoTask
+        ${data?.schedule?.running
+          ? html`
+              <div class="running-box">
+                <div class="schedule-line">
+                  <${Badge} kind="ok">正在下载</${Badge}>
+                  <span class="ellipsis" title=${data.schedule.running.title}>${data.schedule.running.title}</span>
+                </div>
+                <${ProgressBar} percent=${data.schedule.running.ratio * 100} />
+                <div class="dim small">
+                  ${(data.schedule.running.ratio * 100).toFixed(1)}% ·
+                  ${formatSize(data.schedule.running.downloadedBytes)} / ${formatSize(data.schedule.running.totalBytes)}
+                  ${data.schedule.running.speed > 0 ? ` · ${formatSpeed(data.schedule.running.speed)}` : ' · 暂时没速度'}
+                  ${data.schedule.running.peers > 0 ? ` · ${data.schedule.running.peers} 个 peer` : ''}
+                  · 开始于 ${formatClockText(data.schedule.running.startedAt)}
+                  ${data.schedule.running.speed > 0
+                    ? ` · 预计还要 ${Math.max(1, Math.round((data.schedule.running.totalBytes - data.schedule.running.downloadedBytes) / data.schedule.running.speed / 60))} 分钟`
+                    : ''}
+                </div>
+                <div class="dim small">
+                  文件大小看着是满的（断点续传会预分配），但里面还没写满 ——
+                  现在打开播放会失败，进度以这里的「已校验」为准；实在着急也可以去「片库」页核对。
+                </div>
+              </div>
+            `
+          : autoTask
           ? html`
               <div class="job-detail">${autoTask.progress ?? '正在处理…'}</div>
               <${ProgressBar} percent=${autoTask.ratio === null ? null : autoTask.ratio * 100} indeterminate=${autoTask.ratio === null} />

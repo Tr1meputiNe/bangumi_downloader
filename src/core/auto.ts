@@ -16,6 +16,8 @@ import {
   applyPlan,
   autoSchedulePath,
   broadcastTimeOf,
+  clearRunning,
+  publishRunning,
   decideRun,
   formatClock,
   isEpisodeDone,
@@ -345,8 +347,10 @@ async function runFromPlanner(
   log.info(`数据来源：Bangumi Watch Planner（${config.plannerBaseUrl}）`);
 
   const maxPerSubject = options.maxEpisodesPerSubject ?? config.download.maxEpisodesPerSubjectPerRun ?? 999;
+  const roundStartedAt = new Date().toISOString();
 
-  for (const gap of gaps) {
+  try {
+    for (const gap of gaps) {
     const name = displayName(gap.subject);
     report.checked += 1;
     try {
@@ -357,6 +361,7 @@ async function runFromPlanner(
         maxPerSubject,
         retryRounds: options.retryRounds,
         saneEpisodeLimit: options.saneEpisodeLimit,
+        onProgress: makeProgressReporter(options.configPath, roundStartedAt),
         // 已经下过的集不再重复搜索下载（Planner 的「未看」不会因为我们下完就变）
         isDone: (episode) => isEpisodeDone(state, gap.subject.id, episode),
         onCompleted: (episodes) => {
@@ -387,13 +392,52 @@ async function runFromPlanner(
         bytesWritten: outcome.bytesWritten ?? 0
       });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      report.skipped.push({ query: name, reason });
-      log.warn(`《${name}》处理失败：${reason}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        report.skipped.push({ query: name, reason });
+        log.warn(`《${name}》处理失败：${reason}`);
+      }
     }
+  } finally {
+    // 不管这一轮怎么结束，界面上的「正在下载」都要清掉
+    if (options.configPath) clearRunning(autoSchedulePath(options.configPath));
   }
 
   return report;
+}
+
+/**
+ * 造一个「把下载进度写到计划文件」的回调。
+ *
+ * 下载跑在计划任务触发的那个进程里，网页界面是另一个常驻进程 ——
+ * 不落盘的话界面上什么都看不到（用户就是这么以为「一直 0 MB」的）。
+ * 节流到 10 秒一次：进度条不需要更细，写文件太勤反而浪费。
+ */
+function makeProgressReporter(configPath: string | undefined, startedAt: string) {
+  let lastWrite = 0;
+  return (info: {
+    title: string;
+    downloadedBytes: number;
+    totalBytes: number;
+    speed: number;
+    peers: number;
+    piecesDone: number;
+    piecesTotal: number;
+  }): void => {
+    if (!configPath) return;
+    const now = Date.now();
+    if (now - lastWrite < 10_000) return;
+    lastWrite = now;
+    publishRunning(autoSchedulePath(configPath), {
+      title: info.title,
+      ratio: info.piecesTotal === 0 ? 0 : info.piecesDone / info.piecesTotal,
+      downloadedBytes: info.downloadedBytes,
+      totalBytes: info.totalBytes,
+      speed: info.speed,
+      peers: info.peers,
+      startedAt,
+      updatedAt: new Date().toISOString()
+    });
+  };
 }
 
 /** 目标集的播出时刻（拿不到就返回 null）。 */
@@ -465,6 +509,16 @@ async function downloadForGap(gap: AnimeGap, options: {
   isDone?: (episode: number) => boolean;
   /** 确认下完之后回调，用来记住「别再下了」。 */
   onCompleted?: (episodes: number[]) => void;
+  /** 下载进度（界面展示用）。 */
+  onProgress?: (info: {
+    title: string;
+    downloadedBytes: number;
+    totalBytes: number;
+    speed: number;
+    peers: number;
+    piecesDone: number;
+    piecesTotal: number;
+  }) => void;
 }): Promise<EntryOutcome> {
   const { config } = options;
   const name = displayName(gap.subject);
@@ -572,6 +626,7 @@ async function downloadForGap(gap: AnimeGap, options: {
     savePath: options.savePath,
     rounds: options.retryRounds,
     onLog: (message) => log.debug(message),
+    onProgress: options.onProgress,
     /*
      * 每轮开始前重新搜一遍。
      *

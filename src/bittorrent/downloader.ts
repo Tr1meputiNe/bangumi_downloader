@@ -131,7 +131,9 @@ export class TorrentDownloader extends EventEmitter {
   #queued = new Set<string>();
   #rarity = new Map<number, number>();
   #lastProgressAt = Date.now();
-  #downloadedSinceSample = 0;
+  #bytesSinceSample = 0;
+  /** 整个过程累计收到的字节数（心跳里展示）。 */
+  #receivedBytes = 0;
   #lastSampleAt = Date.now();
   #speed = 0;
   #lastHeartbeatAt = 0;
@@ -936,6 +938,15 @@ export class TorrentDownloader extends EventEmitter {
 
     state.goodBytes += block.length;
     this.#blocksReceived += 1;
+    /*
+     * 速度按「收到的字节」算，不按「完成的分片」算。
+     *
+     * 踩过的坑：原来只在分片整块校验通过时累加，而分片动辄 2MB ——
+     * 链路只有几十 KB/s 时一个分片要几十秒才完成，2 秒一次的采样永远读到 0，
+     * 于是日志里一直是「速度 0.00 MB/s」，明明在下载却看着像死的。
+     */
+    this.#bytesSinceSample += block.length;
+    this.#receivedBytes += block.length;
     blocks.splice(position, 1);
 
     let pieceBuffer = state.pieces.get(index);
@@ -970,7 +981,6 @@ export class TorrentDownloader extends EventEmitter {
     this.#pieceQueues.delete(index);
     this.#rarity.delete(index);
     this.#lastProgressAt = Date.now();
-    this.#downloadedSinceSample += assembled.length;
 
     // 告诉别人我们有了这个 piece
     for (const other of this.#peers.values()) other.connection.send({ type: 'have', index });
@@ -1057,8 +1067,8 @@ export class TorrentDownloader extends EventEmitter {
     const now = Date.now();
     const elapsed = now - this.#lastSampleAt;
     if (elapsed < 2_000) return;
-    this.#speed = (this.#downloadedSinceSample / elapsed) * 1000;
-    this.#downloadedSinceSample = 0;
+    this.#speed = (this.#bytesSinceSample / elapsed) * 1000;
+    this.#bytesSinceSample = 0;
     this.#lastSampleAt = now;
   }
 
@@ -1125,7 +1135,8 @@ export class TorrentDownloader extends EventEmitter {
     this.#log(
       `状态：连接 ${this.#peers.size}（未阻塞 ${unchoked}，有 bitfield ${withBitfield}）｜` +
         `在途 block ${inFlight}｜待发 ${this.#queued.size}｜已完成分片 ${this.#storage?.verified.size ?? 0}｜` +
-        `累计收到 block ${this.#blocksReceived}（拼装失败 ${this.#verifyFailures}，写盘失败 ${this.#writeFailures}）｜` +
+        `累计收到 ${(this.#receivedBytes / 1024 / 1024).toFixed(1)} MB / ${this.#blocksReceived} 个 block` +
+        `（拼装失败 ${this.#verifyFailures}，写盘失败 ${this.#writeFailures}）｜` +
         `最接近完成：${topPieces || '（无）'}｜速度 ${(this.#speed / 1024 / 1024).toFixed(2)} MB/s`
     );
   }

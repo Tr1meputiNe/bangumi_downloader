@@ -283,6 +283,16 @@ a:hover {
   font-weight: 600;
 }
 
+.running-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  background: rgba(76, 141, 255, 0.06);
+}
+
 .plan-table-wrap {
   display: flex;
   flex-direction: column;
