@@ -95,6 +95,8 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
   if (ordered.length === 0) throw new Error('没有可下载的候选');
 
   let best: FallbackResult | null = null;
+  /** 试跑没达标、但确实拿到了数据的候选（全都不达标时用它兜底）。 */
+  let slowest: { candidate: ScoredCandidate; outcome: AttemptOutcome } | null = null;
   const resumedTotal = 0;
   // （续传结果在下面 probeExisting 之后拿到）
 
@@ -202,14 +204,51 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
     }
 
     /*
-     * 速度不达标：清掉这条候选留下的东西。
+     * 速度不达标：记下「确实收到了数据」的那条当兜底，然后继续看下一条。
      *
-     * 注意不管「有没有拿到数据」都要清 —— 存储层一开始就把文件预分配到完整长度，
-     * 所以哪怕一个分片都没下完，磁盘上也会留一个看着很大的空目录。
-     * 早先只在 bytesWritten > 0 时清理，结果每次都留一堆空壳目录。
+     * 为什么要留兜底：用户那条链路对公共种子的实际速度经常只有 10~40 KB/s，
+     * 全都达不到 20 KB/s 的门槛。全扔掉的话每轮都是「试过的候选都下不动」，
+     * 下一轮从头再来一遍 —— 数据虽然不会丢（引擎会续传），但永远下不完。
+     * 有一条在动就让它继续动，总比空手强。
      */
-    log.info(`    速度不达标（${(trial.throughput / 1024).toFixed(0)} KB/s），清掉试跑数据换下一条`);
+    if (trial.receivedBytes > 2 * 1024 * 1024) {
+      if (!slowest || trial.receivedBytes > slowest.outcome.receivedBytes) slowest = { candidate, outcome: trial };
+      log.info(
+        `    速度不达标（收到 ${(trial.receivedBytes / 1024 / 1024).toFixed(1)} MB，` +
+          `${(trial.throughput / 1024).toFixed(0)} KB/s），先记下这条，继续看下一条`
+      );
+    } else {
+      log.info(`    速度不达标（${(trial.throughput / 1024).toFixed(0)} KB/s），清掉试跑数据换下一条`);
+    }
     removeCandidateOutput(options.savePath, trial.infoHash, candidate.result.title);
+  }
+
+  /*
+   * 所有候选都没达到最低速度：如果有一条确实在收数据，就用它把这一轮跑下去。
+   * 这是「慢但能下」和「永远下不动」的区别 —— 实测用户的链路大多属于前者。
+   */
+  if (!best && slowest) {
+    log.warn(
+      `所有候选都没达到最低速度（${(minThroughput / 1024).toFixed(0)} KB/s），` +
+        `但《${slowest.candidate.result.title.slice(0, 50)}》至少收到了 ` +
+        `${(slowest.outcome.receivedBytes / 1024 / 1024).toFixed(1)} MB，继续用它下`
+    );
+    const remaining = Math.max(60_000, budgetMs - (Date.now() - startedAt));
+    const finish = await runAttempt(slowest.candidate, {
+      ...options,
+      trialSeconds: Math.floor(remaining / 1000),
+      remainingMs: remaining
+    });
+    best = {
+      infoHash: finish.infoHash,
+      title: slowest.candidate.result.title,
+      files: filesOf(finish),
+      bytesWritten: finish.bytesWritten,
+      completed: finish.completed,
+      resumedBytes: resumedTotal,
+      attempts
+    };
+    if (best.completed) return best;
   }
 
   if (best) {
@@ -434,6 +473,8 @@ type AttemptOutcome = {
   completed: boolean;
   infoHash: string;
   bytesWritten: number;
+  /** 累计收到的字节（含未凑成分片的 block）。 */
+  receivedBytes: number;
   throughput: number;
   reason: string;
   /** 引擎报的落盘文件（绝对路径）。 */
@@ -465,6 +506,7 @@ async function runAttempt(
 
   let bytes: number = 0;
   let latestDownloaded: number | null = null;
+  let latestReceived = 0;
 
   /*
    * 目录归纳规则必须和 dispatch（网页那条路）保持一致：
@@ -497,6 +539,7 @@ async function runAttempt(
     onLog: (message) => options.onLog?.(message),
     onProgress: (progress: DownloadProgress) => {
       latestDownloaded = progress.downloadedBytes;
+      latestReceived = progress.receivedBytes;
       bytes = progress.downloadedBytes;
       options.onProgress?.({
         title: candidate.result.title,
@@ -573,7 +616,15 @@ async function runAttempt(
     completed,
     infoHash: infoHash || candidate.result.magnet.slice(0, 40),
     bytesWritten: finalBytes,
-    throughput: finalBytes / elapsed,
+    /*
+     * 吞吐按「收到的数据」算，不按「已校验的分片」算。
+     * 分片粒度是 2MB：75 秒的试跑窗口里，只要链路低于约 27 KB/s 就一片都凑不齐，
+     * 按分片算会得到 0 KB/s，把一条其实在动的候选判成死种 ——
+     * 实测就是这样：8~20 KB/s 的链路被判「下不动」，75 秒一扔，
+     * 每 15 分钟重来一次，用户看到的就是「下不完就被中断」。
+     */
+    throughput: Math.max(finalBytes, latestReceived) / elapsed,
+    receivedBytes: latestReceived,
     reason,
     // 落盘文件用引擎报的清单；它没给（例如失败在取元数据阶段）就退回整目录扫描
     files: files.length > 0 ? files : [],

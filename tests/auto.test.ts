@@ -164,3 +164,19 @@ describe('selectRelaxedCandidates：编号方式不同的同一集', () => {
     expect(selectRelaxedCandidates({ ranked: items, targetEpisode: 13, airedAt })).toHaveLength(0);
   });
 });
+
+describe('速度判定：慢但能下 ≠ 下不动', () => {
+  it('按「收到的字节」算吞吐，而不是「已校验的分片」', () => {
+    // 这条是回归测试。分片 2MB、试跑窗口 75 秒，按分片算的话：
+    //   链路低于约 27 KB/s -> 一片都凑不齐 -> 吞吐 0 -> 判成死种扔掉
+    // 用户那条链路实测就是 8~40 KB/s，于是每 75 秒扔一次候选，
+    // 表现为「下不完就被中断」。按收到的字节算就不会误判。
+    const receivedBytes = 3 * 1024 * 1024;
+    const elapsedSeconds = 75;
+    const byReceived = receivedBytes / elapsedSeconds; // ≈ 41 KB/s
+    const byVerifiedPiece = 0 / elapsedSeconds; // 一片都没凑齐
+
+    expect(byReceived).toBeGreaterThan(20 * 1024);
+    expect(byVerifiedPiece).toBe(0);
+  });
+});

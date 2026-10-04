@@ -68,7 +68,16 @@ export type DownloadOptions = {
 export type DownloadProgress = {
   /** 0~1。 */
   ratio: number;
+  /** 已校验通过的字节数（真实进度，预分配不算）。 */
   downloadedBytes: number;
+  /**
+   * 累计**收到**的字节数（含还没凑成分片的 block）。
+   *
+   * 判断「这条链路有没有速度」必须用它，不能用 downloadedBytes ——
+   * 分片动辄 2MB，慢链路 75 秒一个分片都凑不齐，按分片算永远是 0 KB/s，
+   * 于是候选被判成「下不动」扔掉，下一轮再来一遍，永远下不完。
+   */
+  receivedBytes: number;
   totalBytes: number;
   /** 已校验通过的 piece 数。 */
   piecesDone: number;
@@ -1090,6 +1099,7 @@ export class TorrentDownloader extends EventEmitter {
     this.#options.onProgress({
       ratio: totalPieces === 0 ? 1 : done / totalPieces,
       downloadedBytes: downloaded,
+      receivedBytes: this.#receivedBytes,
       totalBytes: total,
       piecesDone: done,
       piecesTotal: totalPieces,
