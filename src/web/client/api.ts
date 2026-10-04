@@ -80,6 +80,23 @@ export type JobsResponse = {
   running: boolean;
 };
 
+export type LibraryEntry = {
+  name: string;
+  path: string;
+  bytes: number;
+  videoCount: number;
+  otherCount: number;
+  kind: 'series' | 'single' | 'unknown';
+};
+
+export type LibraryResponse = {
+  root: string;
+  seriesRoot?: string | null;
+  totalBytes: number;
+  totalVideos: number;
+  entries: LibraryEntry[];
+};
+
 export type StatusResponse = {
   /** ok | error | not-configured */
   qbittorrent: string;
@@ -119,6 +136,7 @@ export const api = {
   add: (items: unknown[]) =>
     request<AddResponse>('/api/add', { method: 'POST', body: JSON.stringify({ items }) }),
   jobs: () => request<JobsResponse>('/api/jobs'),
+  library: () => request<LibraryResponse>('/api/library'),
   jobAction: (id: string, action: 'pause' | 'resume' | 'cancel') =>
     request<{ ok: boolean; status?: string }>('/api/jobs/act', {
       method: 'POST',

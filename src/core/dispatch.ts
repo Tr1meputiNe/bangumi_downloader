@@ -120,10 +120,19 @@ export async function downloadWithBuiltin(
     }
   }
 
+  /*
+   * 目录归纳：所有番剧都放进 savePath/seriesRoot 下，一部番一个文件夹。
+   * 单文件种子用发布名当文件夹名 —— 否则单集会散落在下载根目录里。
+   */
+  const seriesRoot = config.download.seriesDir?.trim() || undefined;
+  const singleFileDir = input.title;
+
   const downloader = new TorrentDownloader({
     magnet: input.magnet || undefined,
     torrentFile,
     savePath,
+    seriesRoot,
+    singleFileDir,
     selectedFiles,
     timeoutMs: config.download.timeoutMs ?? 60 * 60_000,
     stallTimeoutMs: config.download.stallTimeoutMs ?? 180_000,

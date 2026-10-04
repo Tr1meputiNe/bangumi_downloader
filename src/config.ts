@@ -54,6 +54,14 @@ export type DownloadPreference = {
   /** download 命令探活几条候选（按真实做种数挑最可能下得动的）。默认 10。 */
   probeCandidates?: number;
   /**
+   * 番剧文件夹的统一父目录（相对 savePath）。
+   *
+   * 作用是把「下载内容」和「程序、缓存」分开：所有番剧都放进这个子目录，
+   * 下载根目录下只剩程序目录、.bangumi-meta 和这个番剧目录，一眼能看清。
+   * 留空表示直接放在 savePath 根下（旧行为）。
+   */
+  seriesDir?: string;
+  /**
    * verify 扫描本地内容时要跳过的顶层目录名。
    * 程序自己的目录（含 bangumi-downloader.exe）会被自动识别并跳过，这里用于额外排除。
    */
@@ -204,6 +212,7 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     timeoutMs: 60 * 60_000,
     stallTimeoutMs: 3 * 60_000,
     probeCandidates: 10,
+    seriesDir: '番剧',
     ignoreDirs: [],
     trialSeconds: 90,
     minThroughputKBps: 30,

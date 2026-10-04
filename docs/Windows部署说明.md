@@ -2,20 +2,27 @@
 
 这份说明是给**这台 Windows 机器**写的，记录它实际怎么装的、怎么用、以及踩过的坑。
 
-**目录布局**（软件和下载内容放在一起，但各自独立不混）：
+**目录布局**（归纳过：番剧全在一个目录下，一部番一个文件夹）：
 
 ```
 D:\anime_download\
-├── bangumi-downloader\        ← 软件本体（源码 + 构建产物 + 配置 + 日志）
-├── .bangumi-meta\             ← 校验缓存与本地清单（别删）
-├── [BDrip] Hibike Euphonium S03 [Sakurato&7³ACG]\    ← 下载的番剧
-└── [LinRip] Sound Euphonium Movie Part1 …\           ← 以及自己放进去的片子
+├── 番剧\                                  ← 所有下载内容都在这
+│   ├── [BDrip] Hibike Euphonium S03 [Sakurato&7³ACG]\   一部番一个文件夹
+│   ├── [LinRip] Sound Euphonium Movie Part1 …\
+│   └── [Studio GreenTea] FX Senshi Kurumi-chan [01v2]…\  单集也有自己的文件夹
+├── bangumi-downloader\                    ← 软件本体（源码 + 产物 + 配置 + 日志）
+└── .bangumi-meta\                         ← 校验缓存与本地清单（别删）
 ```
 
-软件之所以放成**子目录**而不是直接铺在 `D:\anime_download` 根下：
-根目录是「下载目录」，程序会自动扫描它来统计内容，
-混在一起会把程序文件当成下载内容。扫描逻辑现在会自动识别并跳过程序目录
-（判据：目录里有没有 `bangumi-downloader.exe`），所以即使你把它放别处也不会误判。
+两条规则：
+
+1. **番剧文件夹统一放在 `番剧\` 下**（`download.seriesDir` 配置）。
+   这样根目录只剩「程序、缓存、内容」三样，一眼能看清，也不会被误删。
+2. **单集也会有自己的文件夹**。多文件种子本来带目录结构，但单集种子是
+   「一个文件」——照原样落盘就会散在下载根目录里，和别的番剧混在一起
+   （实测就有一个单集 mp4 那样躺着）。所以单集用发布名建一个目录再放进去。
+
+改配置想换布局：`download.seriesDir` 留空表示直接放在 savePath 根下（旧行为）。
 
 项目本身的完整文档在 [README.md](README.md)。
 
@@ -248,6 +255,35 @@ Unregister-ScheduledTask -TaskName BangumiDownloader-GUI -Confirm:$false
 - 已结束的任务再操作会被拒（HTTP 409），而不是静默成功
 
 对应的接口是 `POST /api/jobs/act`，body 是 `{"id": "...", "action": "pause|resume|cancel"}`。
+
+### 一条命令看清全局：`summary`
+
+`verify` 是逐条排查用的（某一条到底下完没有、能不能播），条目一多就淹没在细节里。
+日常想知道「我有什么」用 `summary`：
+
+```bat
+bangumi-downloader.exe summary
+```
+
+```
+共 5 部 · 30 个视频 · 32.4GB
+
+    12.1GB  剧集  [Airota&VCB-Studio] Gekijouban Hibike! Euphonium Chikai no Finale [Ma10p_1080p]
+              12 集 +131 附属
+     8.8GB  剧集  [BDrip] Hibike Euphonium S03 [Sakurato&7³ACG]
+              15 集
+     8.6GB  单片  [LinRip] Sound Euphonium Movie Part1 [UHDRip 2160p HEVC-10bit DV TrueHD]
+…
+根目录下的其他内容（不属于番剧）：
+      46KB  2 个文件  .bangumi-meta
+     187MB  3784 个文件  bangumi-downloader
+```
+
+网页界面上也有同样的归纳：打开页面顶部有个可折叠的**「已有内容」**，
+显示「几部 · 几个视频 · 多大体积」，展开就是逐部列表。
+
+表格刻意**不做列对齐** —— 终端里中英混排的显示宽度本来就无法可靠计算
+（同一字符在不同字体/终端下可能是 1 格也可能是 2 格），硬凑的表格只会错位得更难看。
 
 ### 报告里的符号怎么看
 

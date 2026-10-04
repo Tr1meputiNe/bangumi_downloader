@@ -634,3 +634,64 @@ button.ghost:hover:not(:disabled) {
 }
 
 .job-status.paused { background: rgba(255, 190, 80, 0.18); color: #ffc866; }
+
+/* 已有内容（下载库归纳） */
+
+.library {
+  margin: 16px 0 8px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--panel, rgba(255, 255, 255, 0.02));
+}
+
+.linklike {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+
+.linklike:hover {
+  color: #7fb6ff;
+}
+
+.library-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.library-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.library-size {
+  flex: none;
+  width: 62px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #9aa3b2;
+}
+
+.library-kind {
+  flex: none;
+  font-size: 12px;
+  color: #9aa3b2;
+}
+
+.library-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

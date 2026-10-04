@@ -32,6 +32,10 @@ export type DownloadOptions = {
   savePath: string;
   /** 只下载这些文件序号；为空表示全部。 */
   selectedFiles?: number[];
+  /** 所有番剧文件夹的统一父目录（例如「番剧」）。 */
+  seriesRoot?: string;
+  /** 单文件种子用的番剧目录名（通常传发布名），避免单集散在根目录。 */
+  singleFileDir?: string;
   /** 整体超时（毫秒），超时抛错。默认 30 分钟。 */
   timeoutMs?: number;
   /** 多长时间没有任何新 piece 完成就认为卡住，默认 90 秒。 */
@@ -202,7 +206,9 @@ export class TorrentDownloader extends EventEmitter {
 
       this.#storage = new TorrentStorage(meta, {
         savePath: this.#options.savePath,
-        selectedFiles: selectedFiles.length === meta.files.length ? undefined : selectedFiles
+        selectedFiles: selectedFiles.length === meta.files.length ? undefined : selectedFiles,
+        seriesRoot: this.#options.seriesRoot,
+        singleFileDir: this.#options.singleFileDir
       });
 
       const wanted = this.#storage.wantedPieces();

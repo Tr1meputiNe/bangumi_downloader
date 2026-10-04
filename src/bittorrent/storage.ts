@@ -21,6 +21,17 @@ export type StorageOptions = {
   savePath: string;
   /** 只下载这些文件序号；为空表示全部。 */
   selectedFiles?: number[];
+  /**
+   * 单文件种子放进这个子目录（通常按发布名取一个番剧名）。
+   *
+   * 为什么需要：多文件种子本身带目录结构（种子里的 name），天然一部一番。
+   * 但单集种子是「一个文件」，照原样落盘就会散在下载根目录里，
+   * 和别的番剧的文件夹混在一起 —— 实测一个单集 mp4 就那样躺在根下。
+   * 给了这个字段，单集也会有自己的番剧目录。
+   */
+  singleFileDir?: string;
+  /** 所有番剧文件夹的统一父目录（例如「番剧」），让内容与程序/缓存分开。 */
+  seriesRoot?: string;
 };
 
 export type FileHandleEntry = {
@@ -47,9 +58,21 @@ export class TorrentStorage {
     this.pieceLength = meta.pieceLength;
     this.savePath = resolve(options.savePath);
 
+    const seriesRoot = options.seriesRoot?.trim();
+
     const selected = options.selectedFiles && options.selectedFiles.length > 0 ? new Set(options.selectedFiles) : null;
-    // 多文件种子按种子名建子目录，单文件种子直接放根目录
-    const base = meta.singleFile ? this.savePath : join(this.savePath, sanitizeSegment(meta.name));
+
+    /*
+     * 目录归纳：一部番一个文件夹，所有番剧文件夹再统一放到 seriesRoot 下。
+     *
+     *   多文件种子：用种子自带的 name（本来就是一个目录）
+     *   单文件种子：用调用方给的番剧名（否则会散在根目录里）
+     */
+    const root = seriesRoot ? join(this.savePath, sanitizeSegment(seriesRoot)) : this.savePath;
+    const folderName = meta.singleFile
+      ? sanitizeSegment(options.singleFileDir ?? meta.name)
+      : sanitizeSegment(meta.name);
+    const base = join(root, folderName);
 
     this.files = meta.files.map((file) => {
       const relative = sanitizeRelativePath(file.path);

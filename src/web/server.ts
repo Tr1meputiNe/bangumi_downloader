@@ -6,6 +6,7 @@ import { QbittorrentClient } from '../qbittorrent/client.js';
 import { searchAndRank } from '../core/search.js';
 import { resolveBackend } from '../core/dispatch.js';
 import { JobQueue } from '../core/jobs.js';
+import { collectLibrary } from '../core/summary.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -66,6 +67,31 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
   }
   if (request.method === 'POST' && path === '/api/add') {
     return handleAdd(deps, request, response);
+  }
+  if (request.method === 'GET' && path === '/api/library') {
+    const savePath = deps.config.download.savePath || deps.config.qbittorrent.savePath;
+    if (!savePath) return sendJson(response, 200, { root: '', entries: [], totalBytes: 0, totalVideos: 0 });
+    const summary = collectLibrary({
+      savePath,
+      seriesDir: deps.config.download.seriesDir,
+      ignoreDirs: deps.config.download.ignoreDirs ?? []
+    });
+    return sendJson(response, 200, {
+      root: summary.root,
+      seriesRoot: summary.seriesRoot,
+      totalBytes: summary.totalBytes,
+      totalVideos: summary.totalVideos,
+      entries: summary.entries
+        .sort((a, b) => b.bytes - a.bytes)
+        .map((entry) => ({
+          name: entry.name,
+          path: entry.path,
+          bytes: entry.bytes,
+          videoCount: entry.videoCount,
+          otherCount: entry.otherCount,
+          kind: entry.kind
+        }))
+    });
   }
   if (request.method === 'GET' && path === '/api/jobs') {
     const jobs = ensureJobs(deps).list();

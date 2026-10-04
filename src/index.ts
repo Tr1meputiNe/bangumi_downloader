@@ -11,6 +11,7 @@ import { runAuto } from './core/auto.js';
 import { downloadUntilComplete } from './core/retry.js';
 import { acquireLock } from './core/lock.js';
 import { printVerifyReport, verifyAll } from './core/verify.js';
+import { collectLibrary, printLibrarySummary } from './core/summary.js';
 import { ensureWatchlistExample, watchlistPath } from './core/watchlist.js';
 import { searchAll } from './trackers/index.js';
 import { startWebServer } from './web/server.js';
@@ -37,6 +38,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   download      搜索某个关键词，挑出最合适的资源并真正下载（默认下全集）
   auto          按 watchlist.json 自动追番：有新集就下（适合放计划任务里长期跑）
   verify        用种子分片哈希核对磁盘，报告「真实」下载进度（文件大小会骗人）
+  summary       归纳整个下载库：有哪些番、各多少集、多大体积（日常看这个）
   preview       只搜索并打印某部番剧的候选排名（排错用）
   config        打印当前生效的配置
 
@@ -80,6 +82,7 @@ type Command =
   | 'download'
   | 'auto'
   | 'verify'
+  | 'summary'
   | 'help';
 
 export function resolveCommand(raw: string | undefined): Command {
@@ -113,6 +116,10 @@ export function resolveCommand(raw: string | undefined): Command {
     case 'verify':
     case 'status':
       return 'verify';
+    case 'summary':
+    case 'list':
+    case 'ls':
+      return 'summary';
     default:
       return 'help';
   }
@@ -417,6 +424,23 @@ async function cmdDownload(config: AppConfig, configPath: string, options: Downl
   } finally {
     lock.release();
   }
+}
+
+/** 归纳整个下载库。日常想知道「我有什么」时看这个，比 verify 清爽。 */
+function cmdSummary(config: AppConfig): number {
+  const savePath = config.download.savePath || config.qbittorrent.savePath;
+  if (!savePath) {
+    log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
+    return 2;
+  }
+
+  const summary = collectLibrary({
+    savePath,
+    seriesDir: config.download.seriesDir,
+    ignoreDirs: config.download.ignoreDirs ?? []
+  });
+  printLibrarySummary(summary);
+  return 0;
 }
 
 /**
@@ -815,6 +839,8 @@ export async function main(argv: string[]): Promise<number> {
         dryRun: values['dry-run'],
         retryRounds: resolveRetryRounds(config, values.retry, values['no-retry'])
       });
+    case 'summary':
+      return cmdSummary(config);
     case 'verify':
       return cmdVerify(config, {
         infoHash: values.query ?? positionals[1],

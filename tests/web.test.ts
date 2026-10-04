@@ -7,6 +7,9 @@ import { selectFileIndexes } from '../src/core/push.js';
 import { toDisplayResult } from '../src/web/serialize.js';
 import { rankCandidates } from '../src/anime/rank.js';
 import { JobQueue } from '../src/core/jobs.js';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SearchResult } from '../src/anime/rank.js';
 
 function result(overrides: Partial<SearchResult> & { title: string }): SearchResult {
@@ -442,5 +445,44 @@ describe('任务操作：暂停 / 继续 / 取消', () => {
     expect(typeof job?.canResume).toBe('boolean');
     expect(typeof job?.canCancel).toBe('boolean');
     await act(id, 'cancel');
+  });
+});
+
+describe('下载库归纳（/api/library）', () => {
+  it('返回按体积排序的条目，供界面显示「已有内容」', async () => {
+    const config = defaultConfig();
+    config.web = { ...config.web, port: 0, host: '127.0.0.1', openBrowser: false };
+    // 指到一个临时目录，里面造两部「番剧」
+    const root = mkdtempSync(join(tmpdir(), 'library-'));
+    const seriesRoot = join(root, '番剧');
+    mkdirSync(join(seriesRoot, 'A 番'), { recursive: true });
+    mkdirSync(join(seriesRoot, 'B 番'), { recursive: true });
+    writeFileSync(join(seriesRoot, 'A 番', '01.mkv'), Buffer.alloc(400 * 1024));
+    writeFileSync(join(seriesRoot, 'A 番', '02.mkv'), Buffer.alloc(400 * 1024));
+    writeFileSync(join(seriesRoot, 'B 番', 'movie.mp4'), Buffer.alloc(100 * 1024));
+    config.download = { ...config.download, savePath: root, seriesDir: '番剧' };
+
+    const started = await startWebServer({ config, qbittorrent: undefined });
+    try {
+      const response = await fetch(`${started.url}api/library`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        entries: Array<{ name: string; bytes: number; videoCount: number; kind: string }>;
+        totalVideos: number;
+        seriesRoot?: string | null;
+      };
+
+      expect(body.entries).toHaveLength(2);
+      // 按体积降序：A 番（两个文件）在前
+      expect(body.entries[0]?.name).toBe('A 番');
+      expect(body.entries[0]?.videoCount).toBe(2);
+      expect(body.entries[0]?.kind).toBe('series');
+      expect(body.entries[1]?.kind).toBe('single');
+      expect(body.totalVideos).toBe(3);
+      expect(body.seriesRoot).toContain('番剧');
+    } finally {
+      await started.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

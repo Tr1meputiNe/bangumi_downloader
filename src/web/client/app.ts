@@ -8,7 +8,15 @@
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { html } from './html.js';
-import { api, type AddResponse, type JobView, type ResultItem, type SearchResponse, type StatusResponse } from './api.js';
+import {
+  api,
+  type AddResponse,
+  type JobView,
+  type LibraryResponse,
+  type ResultItem,
+  type SearchResponse,
+  type StatusResponse
+} from './api.js';
 
 /** 任务操作。与后端 /api/jobs/act 的 action 对应。 */
 type JobAction = 'pause' | 'resume' | 'cancel';
@@ -43,6 +51,8 @@ function App() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [jobsRunning, setJobsRunning] = useState(false);
+  const [library, setLibrary] = useState<LibraryResponse | null>(null);
+  const [showLibrary, setShowLibrary] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -87,6 +97,28 @@ function App() {
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  /*
+   * 下载库归纳。
+   *
+   * 任务结束（或刚打开页面）时拉一次就够了 —— 内容是磁盘上的东西，
+   * 不像任务进度那样每秒都在变，没必要高频轮询。
+   */
+  const refreshLibrary = useCallback(() => {
+    api
+      .library()
+      .then(setLibrary)
+      .catch(() => setLibrary(null));
+  }, []);
+
+  useEffect(() => {
+    refreshLibrary();
+  }, [refreshLibrary]);
+
+  useEffect(() => {
+    // 有任务刚跑完就刷新，这样下完的东西立刻出现在列表里
+    if (!jobsRunning && jobs.some((job) => job.status === 'completed')) refreshLibrary();
+  }, [jobsRunning, jobs, refreshLibrary]);
 
   const runSearch = useCallback(async (keyword: string) => {
     const trimmed = keyword.trim();
@@ -295,6 +327,37 @@ function App() {
               ${adding ? '提交中…' : '开始下载'}
             </button>
           </div>
+        </div>
+      `}
+
+      ${library && library.entries.length > 0 &&
+      html`
+        <div class="library">
+          <div class="jobs-head">
+            <button type="button" class="linklike" onClick=${() => setShowLibrary((value) => !value)}>
+              ${showLibrary ? '▾' : '▸'} 已有内容
+            </button>
+            <span class="dim">
+              ${library.entries.length} 部 · ${library.totalVideos} 个视频 · ${formatSize(library.totalBytes)}
+            </span>
+          </div>
+          ${showLibrary &&
+          html`
+            <div class="library-list">
+              ${library.entries.map(
+                (entry) => html`
+                  <div class="library-row">
+                    <span class="library-size">${formatSize(entry.bytes)}</span>
+                    <span class="library-kind">${entry.kind === 'series' ? '剧集' : entry.kind === 'single' ? '单片' : '其他'}</span>
+                    <span class="library-name" title=${entry.path}>${entry.name}</span>
+                    <span class="dim">
+                      ${entry.videoCount > 1 ? `${entry.videoCount} 集` : entry.videoCount === 1 ? '1 个视频' : ''}
+                    </span>
+                  </div>
+                `
+              )}
+            </div>
+          `}
         </div>
       `}
 
