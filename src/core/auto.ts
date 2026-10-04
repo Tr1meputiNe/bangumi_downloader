@@ -153,9 +153,10 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
       let taskSync: SyncResult | undefined;
       if (decision.action === 'refresh') {
         const plan = await computePlan(options, { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'planner' }, now);
+        const previousTriggers = updated.triggers;
         applyPlan(updated, plan, now);
         log.info(`计划已刷新，下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
-        taskSync = await maybeSyncTask(options, plan, now);
+        taskSync = await maybeSyncTask(options, plan, now, previousTriggers);
       }
 
       updated.lastSkipReason = decision.reason;
@@ -182,6 +183,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   if (options.configPath) {
     const plan = await computePlan(options, report, now);
     const updated = state ?? loadAutoSchedule(schedulePath, now);
+    const previousTriggers = updated.triggers;
     applyPlan(updated, plan, now);
     updated.lastSkipReason = null;
     pruneDone(updated, now);
@@ -189,7 +191,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
 
     report.schedule = { nextCheckAt: plan.nextCheckAt.toISOString(), reason: plan.reason, due: plan.due };
     log.info(`下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
-    report.taskSync = await maybeSyncTask(options, plan, now);
+    report.taskSync = await maybeSyncTask(options, plan, now, previousTriggers);
     for (const item of plan.stale.slice(0, 5)) {
       log.debug(`《${item.query}》第 ${item.episode ?? '?'} 集播出已久仍没找到片源，本集不再密集检查`);
     }
@@ -204,13 +206,32 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
  * 为什么放在程序里而不是安装脚本里：播出安排每周都在变，
  * 只在安装时排一次的话第二天就不准了。每次跑完顺手重排一次最省心。
  */
-async function maybeSyncTask(options: AutoOptions, plan: SchedulePlan, now: Date): Promise<SyncResult | undefined> {
+async function maybeSyncTask(
+  options: AutoOptions,
+  plan: SchedulePlan,
+  now: Date,
+  previousTriggers: AutoScheduleState['triggers']
+): Promise<SyncResult | undefined> {
   if (options.syncTask !== true) return undefined;
 
   const taskPlan = buildTaskSchedule(plan, now, {
     activeIntervalMinutes: options.config.download.activeIntervalMinutes ?? 15,
     idleIntervalMinutes: options.config.download.idleIntervalMinutes ?? 180
   });
+
+  /*
+   * 安排没变就别去动计划任务了。
+   *
+   * 活跃窗口里每 15 分钟跑一轮，如果每轮都去起一个 PowerShell 改触发器，
+   * 那是白烧 CPU（而且任务计划程序每次都会重新计算下次时间）。
+   * 只有窗口集合真的变了才同步。
+   */
+  const next = taskPlan.triggers.map((item) => `${item.start.toISOString()}|${item.until.toISOString()}`);
+  const previous = previousTriggers.map((item) => `${item.start}|${item.until}`);
+  if (next.length === previous.length && next.every((value, index) => value === previous[index])) {
+    log.debug('播出安排没变，计划任务触发器保持原样');
+    return { ok: true, message: '播出安排没变，触发器保持原样' };
+  }
 
   return await syncTaskSchedule({
     taskName: options.taskName ?? 'BangumiDownloader',

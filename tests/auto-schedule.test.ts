@@ -472,3 +472,33 @@ describe('计划任务同步脚本', () => {
     expect(result.message).toContain('保持原来的触发器不动');
   });
 });
+
+describe('计划任务触发器与程序自己的检查点对齐', () => {
+  it('已经在窗口里时，触发器从「下一个检查点」开始，而不是立刻空跑一轮', () => {
+    const now = at('2026-10-04 17:05');
+    const plan = planSchedule([subject('甲番', 1, '2026-10-04', '16:00')], now, OPTIONS);
+
+    expect(plan.due).toBe(true);
+    // 程序自己下一次检查是 15 分钟后，触发器也从那一刻开始
+    expect(plan.triggers[0]?.start.getTime()).toBe(plan.nextCheckAt.getTime());
+  });
+
+  it('还没播的集：触发窗口正好是「该取片源」到窗口结束', () => {
+    const now = at('2026-10-04 13:00');
+    const plan = planSchedule([subject('甲番', 1, '2026-10-04', '16:00')], now, OPTIONS);
+
+    expect(plan.due).toBe(false);
+    expect(plan.triggers).toHaveLength(1);
+    expect(plan.triggers[0]?.start.getTime()).toBe(at('2026-10-04 17:00').getTime());
+    expect(plan.triggers[0]?.until.getTime()).toBe(at('2026-10-05 04:00').getTime());
+    // 干活时间 = 触发窗口的起点
+    expect(plan.nextCheckAt.getTime()).toBe(plan.triggers[0]?.start.getTime());
+  });
+
+  it('播出已久还没片源的集不排触发器（只剩重读计划的低频触发）', () => {
+    const now = at('2026-10-06 13:00');
+    const plan = planSchedule([subject('冷门番', 3, '2026-10-04', '16:00')], now, OPTIONS);
+    expect(plan.triggers).toEqual([]);
+    expect(plan.stale).toHaveLength(1);
+  });
+});

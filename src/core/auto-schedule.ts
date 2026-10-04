@@ -273,9 +273,10 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
         readyAt: readyAt.toISOString(),
         until: until.toISOString()
       });
-      // 已经在窗口里：触发器从现在开始（下一分钟），别等到明天
+      // 已经在窗口里：下一个检查点开始（和程序自己的 nextCheckAt 对齐，
+      // 免得触发器在没到点的时候空跑一轮）
       triggers.push({
-        start: new Date(now.getTime() + 60_000),
+        start: new Date(now.getTime() + activeInterval * 60_000),
         until,
         label: `《${subject.name}》${episodeText}`
       });
