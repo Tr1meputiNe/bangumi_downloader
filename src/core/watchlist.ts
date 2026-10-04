@@ -81,6 +81,58 @@ export function saveWatchlist(path: string, list: Watchlist): void {
   writeFileSync(path, `${JSON.stringify(list, null, 2)}\n`, 'utf8');
 }
 
+/**
+ * 新增或修改一条追番。
+ *
+ * 界面上「改」和「加」是同一个动作（改番名相当于换一条），所以合并成一个函数：
+ * 先按 originalQuery（没有就用 entry.query）找，找到就更新，找不到就追加。
+ *
+ * 一个刻意的行为：手工把 lastEpisode 往回改时，会把超过它的逐集记录一起删掉。
+ * 否则「进度改成第 3 集」之后，completedEpisodes 里还留着 4~12 集，
+ * 下一轮自动追番会认为这些都不用下 —— 用户看到的进度和实际行为就对不上了。
+ */
+export function upsertWatchEntry(path: string, entry: WatchEntry, originalQuery?: string): Watchlist {
+  const list = loadWatchlist(path);
+  const key = originalQuery ?? entry.query;
+  const index = list.entries.findIndex((item) => item.query === key);
+
+  const next: WatchEntry = {
+    query: entry.query,
+    lastEpisode: entry.lastEpisode,
+    completedEpisodes: entry.completedEpisodes,
+    startFrom: entry.startFrom,
+    note: entry.note,
+    enabled: entry.enabled !== false
+  };
+
+  const previous = index >= 0 ? list.entries[index] : undefined;
+  if (previous && typeof next.lastEpisode === 'number' && next.completedEpisodes === undefined) {
+    const kept = (previous.completedEpisodes ?? []).filter((episode) => episode <= (next.lastEpisode as number));
+    next.completedEpisodes = kept.length > 0 ? kept : undefined;
+  }
+
+  if (index >= 0) list.entries[index] = next;
+  else list.entries.push(next);
+
+  saveWatchlist(path, list);
+  return list;
+}
+
+/** 删除一条追番，返回删除后的清单。 */
+export function removeWatchEntry(path: string, query: string): Watchlist {
+  const list = loadWatchlist(path);
+  list.entries = list.entries.filter((item) => item.query !== query);
+  saveWatchlist(path, list);
+  return list;
+}
+
+/** 每条追番「下一集该找第几集」。界面用它显示进度。 */
+export function nextEpisodeOf(entry: WatchEntry): number {
+  const start = typeof entry.startFrom === 'number' && entry.startFrom > 0 ? entry.startFrom : 1;
+  const last = typeof entry.lastEpisode === 'number' ? entry.lastEpisode : start - 1;
+  return Math.max(last + 1, start);
+}
+
 /** 写一份示例清单，方便用户照着改。已存在时不覆盖。 */
 export function ensureWatchlistExample(path: string): boolean {
   if (existsSync(path)) return false;

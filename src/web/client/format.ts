@@ -12,6 +12,17 @@ export function formatSize(bytes: number | null | undefined): string {
   return `${value.toFixed(value >= 100 || unit <= 1 ? 0 : 1)}${units[unit]}`;
 }
 
+export function formatSpeed(bytesPerSecond: number | null | undefined): string {
+  if (!bytesPerSecond || bytesPerSecond <= 0) return '';
+  return `${formatSize(bytesPerSecond)}/s`;
+}
+
+/** 百分比：0.1234 → 12.3% */
+export function formatPercent(ratio: number | null | undefined, digits = 1): string {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '—';
+  return `${(ratio * 100).toFixed(digits)}%`;
+}
+
 /** 把各种时间格式转成「3 天前」这类相对时间；解析不了就原样返回。 */
 export function relativeTime(input: string | null): string {
   if (!input) return '';
@@ -42,6 +53,34 @@ export function relativeTime(input: string | null): string {
   return input;
 }
 
+/** 绝对时间，紧凑到「01-02 15:04」。用于任务开始/结束时间这种需要精确的地方。 */
+export function formatClock(input: string | null | undefined): string {
+  if (!input) return '—';
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return input;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return sameDay ? `今天 ${clock}` : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
+}
+
+/** 两个时间点之间的耗时，例如「3 分 12 秒」。 */
+export function formatElapsed(from: string | null, to: string | null = null): string {
+  if (!from) return '';
+  const start = Date.parse(from);
+  const end = to ? Date.parse(to) : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return '';
+
+  const seconds = Math.round((end - start) / 1000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时 ${minutes % 60} 分`;
+  return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+}
+
 const TRACKER_NAMES: Record<string, string> = {
   'animes.garden': 'AnimeGarden',
   mikan: 'Mikan',
@@ -50,4 +89,32 @@ const TRACKER_NAMES: Record<string, string> = {
 
 export function shortTracker(tracker: string): string {
   return TRACKER_NAMES[tracker] ?? tracker;
+}
+
+/** 长路径在界面上要能看清是哪一层：保留末尾若干段。 */
+export function shortenPath(path: string, keep = 3): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== '');
+  if (parts.length <= keep) return path;
+  return `…/${parts.slice(-keep).join('/')}`;
+}
+
+/** 把数字数组压成「1-13」这种写法。 */
+export function compactEpisodes(episodes: readonly number[]): string {
+  if (episodes.length === 0) return '';
+  const sorted = [...episodes].sort((a, b) => a - b);
+  const ranges: string[] = [];
+  let start = sorted[0] as number;
+  let previous = start;
+
+  for (const episode of sorted.slice(1)) {
+    if (episode === previous + 1) {
+      previous = episode;
+      continue;
+    }
+    ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+    start = episode;
+    previous = episode;
+  }
+  ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+  return ranges.join(',');
 }

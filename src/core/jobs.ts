@@ -213,6 +213,24 @@ export class JobQueue extends EventEmitter {
     return this.act(id, 'cancel').ok;
   }
 
+  /**
+   * 清掉已经结束的任务记录，返回清掉几条。
+   *
+   * 只删 completed / failed / cancelled —— 暂停中的任务还留着进度，
+   * 删掉记录会让用户以为下好的东西没了。
+   */
+  clearFinished(): number {
+    let removed = 0;
+    for (const [id, job] of [...this.#jobs]) {
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+        this.#jobs.delete(id);
+        removed += 1;
+      }
+    }
+    if (removed > 0) log.info(`已清理 ${removed} 条结束的任务记录`);
+    return removed;
+  }
+
   #setStatus(job: DownloadJob, status: JobStatus): void {
     job.status = status;
     this.emit('update', job);

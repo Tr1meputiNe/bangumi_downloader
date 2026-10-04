@@ -1,0 +1,231 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { defaultConfig } from '../src/config.js';
+import {
+  applyEntries,
+  readRawConfig,
+  redactConfig,
+  restartEntries,
+  unknownTopLevelKeys,
+  validatePatch,
+  writeRawConfig
+} from '../src/web/settings.js';
+import { buildProbeScript, describeResult, formatInterval, parseProbeOutput } from '../src/web/schedule.js';
+import {
+  loadWatchlist,
+  markEpisodesCompleted,
+  nextEpisodeOf,
+  removeWatchEntry,
+  upsertWatchEntry
+} from '../src/core/watchlist.js';
+
+const roots: string[] = [];
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe('设置：patch 校验', () => {
+  it('只接受白名单里的字段', () => {
+    expect(validatePatch({ download: { readyDelayMinutes: 30 } }).ok).toBe(true);
+    const bad = validatePatch({ download: { nope: 1 } });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain('不支持修改');
+  });
+
+  it('空 patch 被拒绝（避免「保存了一个什么都没改的请求」）', () => {
+    const result = validatePatch({});
+    expect(result.ok).toBe(false);
+  });
+
+  it('类型和范围都会检查', () => {
+    expect(validatePatch({ download: { enabled: 'yes' } }).ok).toBe(false);
+    expect(validatePatch({ web: { port: 0 } }).ok).toBe(false);
+    expect(validatePatch({ web: { port: 65536 } }).ok).toBe(false);
+    expect(validatePatch({ logLevel: 'loud' }).ok).toBe(false);
+    expect(validatePatch({ logLevel: 'debug' }).ok).toBe(true);
+    expect(validatePatch({ trackers: { animesGarden: true } }).ok).toBe(true);
+  });
+
+  it('数组字段必须是字符串数组', () => {
+    expect(validatePatch({ preference: { excludeKeywords: ['pv'] } }).ok).toBe(true);
+    expect(validatePatch({ preference: { excludeKeywords: [1] } }).ok).toBe(false);
+  });
+
+  it('摊平成点分路径，方便只写改过的字段', () => {
+    const result = validatePatch({ download: { savePath: '/x' }, web: { port: 4000 } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.entries).toEqual([
+        { path: 'download.savePath', value: '/x' },
+        { path: 'web.port', value: 4000 }
+      ]);
+    }
+  });
+
+  it('applyEntries 会补出中间层，不覆盖兄弟字段', () => {
+    const target: Record<string, unknown> = { download: { savePath: '/keep', enabled: true } };
+    applyEntries(target, [{ path: 'download.readyDelayMinutes', value: 15 }]);
+    expect(target).toEqual({ download: { savePath: '/keep', enabled: true, readyDelayMinutes: 15 } });
+
+    const empty: Record<string, unknown> = {};
+    applyEntries(empty, [{ path: 'notify.telegram.chatId', value: '1' }]);
+    expect(empty).toEqual({ notify: { telegram: { chatId: '1' } } });
+  });
+
+  it('需要重启的字段会被标出来', () => {
+    const result = validatePatch({ web: { host: '0.0.0.0' }, download: { readyDelayMinutes: 5 } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(restartEntries(result.entries)).toEqual(['web.host']);
+  });
+});
+
+describe('设置：读写与脱敏', () => {
+  it('密钥不回传，只说明有没有设置过', () => {
+    const config = defaultConfig();
+    config.qbittorrent.password = 'hunter2';
+    config.notify.serverChanKey = 'SCT';
+    config.notify.telegram = { botToken: 'tok', chatId: '42' };
+
+    const redacted = redactConfig(config);
+    const qb = redacted.qbittorrent as Record<string, unknown>;
+    const notify = redacted.notify as Record<string, unknown>;
+    expect(qb.password).toBe('');
+    expect(notify.serverChanKey).toBe('');
+    expect((notify.telegram as Record<string, unknown>).botToken).toBe('');
+    // chatId 不是密钥，照常回传
+    expect((notify.telegram as Record<string, unknown>).chatId).toBe('42');
+    expect((redacted.secrets as Record<string, boolean>)['qbittorrent.password']).toBe(true);
+    expect((redacted.secrets as Record<string, boolean>)['notify.telegram.botToken']).toBe(true);
+    // 原对象不能被改动
+    expect(config.qbittorrent.password).toBe('hunter2');
+  });
+
+  it('写回 config.json 时保留用户自己加的键', () => {
+    const root = mkdtempSync(join(tmpdir(), 'settings-'));
+    roots.push(root);
+    const path = join(root, 'config.json');
+    writeFileSync(path, JSON.stringify({ download: { savePath: '/a' }, myOwnNote: 'hello' }), 'utf8');
+
+    const raw = readRawConfig(path);
+    expect(raw.myOwnNote).toBe('hello');
+    applyEntries(raw, [{ path: 'download.savePath', value: '/b' }]);
+    writeRawConfig(path, raw);
+
+    const reread = readRawConfig(path);
+    expect(reread.myOwnNote).toBe('hello');
+    expect((reread.download as Record<string, unknown>).savePath).toBe('/b');
+    expect(unknownTopLevelKeys(reread, ['download', 'web'])).toEqual(['myOwnNote']);
+  });
+
+  it('文件坏了也不抛异常，按空配置处理', () => {
+    const root = mkdtempSync(join(tmpdir(), 'settings-'));
+    roots.push(root);
+    const path = join(root, 'config.json');
+    writeFileSync(path, '{ 坏掉的 json', 'utf8');
+    expect(readRawConfig(path)).toEqual({});
+  });
+});
+
+describe('计划任务：输出解析', () => {
+  it('把 ISO8601 间隔说成人话', () => {
+    expect(formatInterval('PT15M')).toBe('每 15 分钟');
+    expect(formatInterval('PT1H')).toBe('每 1 小时');
+    expect(formatInterval('PT30S')).toBe('每 1 分钟');
+    expect(formatInterval('')).toBeNull();
+    expect(formatInterval(null)).toBeNull();
+  });
+
+  it('退出码翻译成人话', () => {
+    expect(describeResult(0)).toContain('成功');
+    expect(describeResult(0x41301)).toContain('正在运行');
+    expect(describeResult(0x41303)).toContain('还没运行过');
+    expect(describeResult(1)).toBe('退出码 1');
+    expect(describeResult(null)).toBe('未知');
+  });
+
+  it('解析 PowerShell 的 JSON，单个对象也当成一条', () => {
+    const one = parseProbeOutput('{"name":"BangumiDownloader","state":"Ready","lastRun":"2024-05-01 10:00:00","nextRun":null,"lastResult":0,"interval":"PT15M"}');
+    expect(one).toHaveLength(1);
+    expect(one[0]?.name).toBe('BangumiDownloader');
+    expect(one[0]?.interval).toBe('每 15 分钟');
+    expect(one[0]?.lastResultText).toContain('成功');
+
+    const many = parseProbeOutput(
+      JSON.stringify([
+        { name: 'A', state: 'Running', lastResult: 0x41301 },
+        { name: 'B', state: 'Ready', lastResult: 1 }
+      ])
+    );
+    expect(many).toHaveLength(2);
+    expect(many[0]?.state).toBe('Running');
+    expect(many[1]?.lastResultText).toBe('退出码 1');
+  });
+
+  it('输出不是 JSON 时返回空数组，而不是崩掉', () => {
+    expect(parseProbeOutput('powershell 报错了')).toEqual([]);
+    expect(parseProbeOutput('')).toEqual([]);
+  });
+
+  it('探测脚本里带上了要查的任务名', () => {
+    const script = buildProbeScript(['BangumiDownloader', 'BangumiDownloader-GUI']);
+    expect(script).toContain('BangumiDownloader-GUI');
+    expect(script).toContain('Get-ScheduledTaskInfo');
+    // 时间要在 PowerShell 里先格式化，避免 ConvertTo-Json 的日期格式差异
+    expect(script).toContain('yyyy-MM-dd HH:mm:ss');
+  });
+});
+
+describe('追番清单：进度编辑', () => {
+  const make = (): string => {
+    const root = mkdtempSync(join(tmpdir(), 'watch-'));
+    roots.push(root);
+    return join(root, 'watchlist.json');
+  };
+
+  it('新增与修改', () => {
+    const path = make();
+    upsertWatchEntry(path, { query: 'A 番', startFrom: 1 });
+    upsertWatchEntry(path, { query: 'A 番', lastEpisode: 5, note: '备注' });
+    const list = loadWatchlist(path);
+    expect(list.entries).toHaveLength(1);
+    expect(list.entries[0]?.lastEpisode).toBe(5);
+    expect(list.entries[0]?.note).toBe('备注');
+  });
+
+  it('改番名相当于重命名，不会多出一条', () => {
+    const path = make();
+    upsertWatchEntry(path, { query: '旧名字', lastEpisode: 3 });
+    upsertWatchEntry(path, { query: '新名字', lastEpisode: 3 }, '旧名字');
+    const list = loadWatchlist(path);
+    expect(list.entries).toHaveLength(1);
+    expect(list.entries[0]?.query).toBe('新名字');
+  });
+
+  it('进度往回改时，把超过它的逐集记录一起收拢（否则会以为那些集已下过）', () => {
+    const path = make();
+    markEpisodesCompleted(path, 'A 番', [1, 2, 3, 4, 5]);
+    expect(loadWatchlist(path).entries[0]?.completedEpisodes).toEqual([1, 2, 3, 4, 5]);
+
+    upsertWatchEntry(path, { query: 'A 番', lastEpisode: 3 });
+    const entry = loadWatchlist(path).entries[0];
+    expect(entry?.lastEpisode).toBe(3);
+    expect(entry?.completedEpisodes).toEqual([1, 2, 3]);
+  });
+
+  it('下一集集号', () => {
+    expect(nextEpisodeOf({ query: 'x' })).toBe(1);
+    expect(nextEpisodeOf({ query: 'x', startFrom: 5 })).toBe(5);
+    expect(nextEpisodeOf({ query: 'x', lastEpisode: 12 })).toBe(13);
+    expect(nextEpisodeOf({ query: 'x', startFrom: 5, lastEpisode: 12 })).toBe(13);
+  });
+
+  it('删除', () => {
+    const path = make();
+    upsertWatchEntry(path, { query: 'A 番' });
+    upsertWatchEntry(path, { query: 'B 番' });
+    removeWatchEntry(path, 'A 番');
+    expect(loadWatchlist(path).entries.map((entry) => entry.query)).toEqual(['B 番']);
+  });
+});

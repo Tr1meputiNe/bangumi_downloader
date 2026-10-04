@@ -171,7 +171,7 @@ describe('Web 服务', () => {
     const response = await fetch(started.url);
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain('<title>番剧资源搜索</title>');
+    expect(html).toContain('<title>番剧下载器</title>');
 
     if (clientJs() === null || clientCss() === null) {
       // 未构建前端时应当给出明确提示，而不是白屏

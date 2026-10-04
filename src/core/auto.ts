@@ -52,6 +52,14 @@ export type AutoOptions = {
 export type AutoReport = {
   subjects: number;
   checked: number;
+  /**
+   * 本轮「要下什么」是从哪来的。
+   *
+   * 界面需要它：preferPlanner 打开时 Planner 连不上会自动退回清单，
+   * 而两种来源的结果长得一模一样 —— 不标出来的话，用户会以为
+   * Planner 里的「在看」被处理了，实际看的是另一份清单。
+   */
+  source: 'planner' | 'watchlist';
   downloaded: Array<{ query: string; episodes: number[]; files: number; completed: boolean; bytesWritten: number }>;
   skipped: Array<{ query: string; reason: string }>;
 };
@@ -62,7 +70,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
     log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
-    return { subjects: 0, checked: 0, downloaded: [], skipped: [] };
+    return { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'watchlist' };
   }
 
   // 优先问 Planner；连不上再退回本地清单
@@ -100,7 +108,7 @@ async function runFromPlanner(options: AutoOptions, savePath: string): Promise<A
     readyDelayMinutes: config.download.readyDelayMinutes ?? null
   });
 
-  const report: AutoReport = { subjects: gaps.length, checked: 0, downloaded: [], skipped: [] };
+  const report: AutoReport = { subjects: gaps.length, checked: 0, downloaded: [], skipped: [], source: 'planner' };
   if (gaps.length === 0) {
     log.info('Planner 里没有「已播出但没看」的集数');
     return report;
@@ -223,7 +231,7 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
   const path = options.watchlistFile ?? watchlistPath(options.configPath);
   const list = loadWatchlist(path);
 
-  const report: AutoReport = { subjects: list.entries.length, checked: 0, downloaded: [], skipped: [] };
+  const report: AutoReport = { subjects: list.entries.length, checked: 0, downloaded: [], skipped: [], source: 'watchlist' };
 
   if (list.entries.length === 0) {
     log.warn(`追番清单是空的（${path}）。把要追的番名填进 entries 即可，例如：`);

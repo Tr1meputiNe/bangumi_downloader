@@ -466,6 +466,8 @@ async function cmdVerify(
     cleanEmpty: options.cleanEmpty,
     addLocal: options.addLocal,
     checkPlayable: options.checkPlayable,
+    // 不带番剧目录会找错地方：内容都在 savePath/番剧/ 下面
+    seriesDir: config.download.seriesDir,
     ignoreDirs: config.download.ignoreDirs ?? []
   });
 
@@ -546,7 +548,7 @@ function printRanked(ranked: readonly ScoredCandidate[], total: number): void {
   }
 }
 
-async function cmdServe(config: AppConfig, options: { port?: number; open?: boolean }): Promise<number> {
+async function cmdServe(config: AppConfig, configPath: string, options: { port?: number; open?: boolean }): Promise<number> {
   const effective: AppConfig = {
     ...config,
     web: {
@@ -585,7 +587,8 @@ async function cmdServe(config: AppConfig, options: { port?: number; open?: bool
 
   let started;
   try {
-    started = await startWebServer({ config: effective, qbittorrent });
+    // configPath 要传下去：设置页要写回 config.json，日志页要据此找 data/bangumi.log
+    started = await startWebServer({ config: effective, configPath, qbittorrent });
   } catch (error) {
     if (error instanceof AlreadyRunningError) {
       /*
@@ -849,7 +852,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
       return 0;
     case 'serve':
-      return cmdServe(config, {
+      return cmdServe(config, configPath, {
         port: values.port !== undefined ? Number(values.port) : undefined,
         open: values['no-open'] ? false : undefined
       });

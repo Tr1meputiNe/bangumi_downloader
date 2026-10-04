@@ -53,6 +53,16 @@ export class SearchCache<T> {
     }
   }
 
+  /**
+   * 手动失效一个 key。
+   *
+   * 用途：搜索结果默认缓存 5 分钟，但用户点「重新搜索」时想要的是最新结果，
+   * 不能拿缓存糊弄他。
+   */
+  delete(key: string): void {
+    this.#entries.delete(key);
+  }
+
   /** 取不到就执行 loader 并写入缓存。同一个 key 的并发调用会共用一次请求。 */
   async getOrLoad(key: string, loader: () => Promise<T>): Promise<{ value: T; cached: boolean }> {
     const hit = this.get(key);

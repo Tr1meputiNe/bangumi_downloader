@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { metaFromInfoBytes, pieceSize, type TorrentMeta } from '../bittorrent/metainfo.js';
 // 目录名归一化复用存储层的实现，避免两处规则不一致
-import { TorrentStorage, sanitizeSegment as sanitize } from '../bittorrent/storage.js';
+import { TorrentStorage, sanitizeSegment as sanitize, sanitizeRelativePath } from '../bittorrent/storage.js';
 import { checkVideoFile, describeIssue, isVideoFile, type PlayabilityIssue } from './video-check.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
@@ -27,6 +27,10 @@ export type TorrentVerifyReport = {
   source: VerifySource;
   infoHash: string;
   name: string;
+  /** 实际去哪个目录找的（绝对路径）。找不到时把「本该在哪」也列出来，方便排查。 */
+  dir: string;
+  /** 那个目录在不在。不在 = 还没下过；在但 empty = 下过但一个分片都没成。 */
+  dirExists: boolean;
   /** 元数据里这个种子应有的文件数。 */
   expectedFiles: number;
   /** 目录里实际存在的文件数（不含填充文件）。 */
@@ -53,6 +57,14 @@ export type TorrentVerifyReport = {
 
 export type VerifyOptions = {
   savePath: string;
+  /**
+   * 番剧文件夹的统一父目录（config.download.seriesDir）。
+   *
+   * 必须传：下载内容现在归纳在 savePath/番剧/ 下面，
+   * 不带这个信息去核对，会把已经下完的番当成「空壳」
+   * —— 找不到文件时每个分片自然都校验不过。
+   */
+  seriesDir?: string;
   /** 元数据缓存目录，默认 <savePath>/.bangumi-meta。 */
   metadataDir?: string;
   /** 只核对这一个 infohash。 */
@@ -89,15 +101,93 @@ export function loadCachedMetas(savePath: string, metadataDir?: string): Torrent
   return metas;
 }
 
+/**
+ * 这个种子实际落在磁盘上的哪个目录。
+ *
+ * 为什么需要单独一步：落盘位置有三套规则，光看种子元数据推不出来 ——
+ *   1. 多文件种子：savePath/[番剧]/种子名/
+ *   2. 老布局（还没启用番剧目录时下的）：savePath/种子名/
+ *   3. 单文件种子：目录名是**发布标题**（调用方给的 singleFileDir），
+ *      不是种子名；而且标题里可能带空格和方括号，没法反推
+ *
+ * 这里按「先找得到、再按规则猜」的顺序定位：
+ * 路径能对上就用，对不上就（对单文件种子）在可能的父目录里找
+ * 「哪个子目录里正好有那个文件」。找不到时返回按规则算出来的路径，
+ * 让报告里能显示「我去哪儿找过了」。
+ */
+export type TorrentLocation = {
+  /** 内容所在目录（绝对路径）。 */
+  dir: string;
+  /** 该目录是否真的存在。 */
+  exists: boolean;
+  /** 传给 TorrentStorage 的 seriesRoot（为空表示内容直接放在 savePath 下）。 */
+  seriesRoot?: string;
+  /** 传给 TorrentStorage 的 singleFileDir（单文件种子用）。 */
+  singleFileDir?: string;
+};
+
+export function locateTorrent(meta: TorrentMeta, savePath: string, seriesDir?: string): TorrentLocation {
+  const seriesRoot = seriesDir?.trim() || '';
+  const nestedRoot = seriesRoot === '' ? null : join(savePath, sanitize(seriesRoot));
+  const folderName = sanitize(meta.name);
+
+  const candidates: TorrentLocation[] = [
+    // 1) 当前布局：番剧子目录下的种子名
+    ...(nestedRoot === null
+      ? []
+      : [{ dir: join(nestedRoot, folderName), exists: false, seriesRoot, singleFileDir: meta.singleFile ? folderName : undefined }]),
+    // 2) 老布局：直接在下载根目录下
+    { dir: join(savePath, folderName), exists: false, singleFileDir: meta.singleFile ? folderName : undefined }
+  ];
+
+  /*
+   * 3) 单文件种子：目录名是发布标题。在可能的父目录里找
+   *    「哪个子目录里正好有那个文件名」，找到了就是它。
+   */
+  if (meta.singleFile) {
+    const relative = sanitizeRelativePath(meta.files[0]?.path ?? meta.name);
+    const fileName = basename(relative) || folderName;
+    for (const base of [nestedRoot, savePath].filter((item): item is string => item !== null)) {
+      let children;
+      try {
+        children = readdirSync(base, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const child of children) {
+        if (!child.isDirectory()) continue;
+        if (!existsSync(join(base, child.name, fileName))) continue;
+        candidates.push({
+          dir: join(base, child.name),
+          exists: true,
+          seriesRoot: base === nestedRoot ? seriesRoot : undefined,
+          singleFileDir: child.name
+        });
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate.dir)) return { ...candidate, exists: true };
+  }
+  return candidates[0] as TorrentLocation;
+}
+
 /** 逐片校验一个种子在磁盘上的真实进度。 */
-export function verifyTorrent(meta: TorrentMeta, savePath: string, options: { checkPlayable?: boolean } = {}): TorrentVerifyReport {
-  const dir = join(savePath, sanitize(meta.name));
-  const exists = existsSync(dir);
+export function verifyTorrent(
+  meta: TorrentMeta,
+  savePath: string,
+  options: { checkPlayable?: boolean; seriesDir?: string } = {}
+): TorrentVerifyReport {
+  const location = locateTorrent(meta, savePath, options.seriesDir);
+  const dir = location.dir;
 
   const report: TorrentVerifyReport = {
     source: 'torrent',
     infoHash: meta.infoHash,
     name: meta.name,
+    dir,
+    dirExists: location.exists,
     expectedFiles: meta.files.filter((file) => !/padding_file/i.test(file.path)).length,
     presentFiles: 0,
     pieceTotal: meta.pieceCount,
@@ -113,14 +203,18 @@ export function verifyTorrent(meta: TorrentMeta, savePath: string, options: { ch
     videoIssues: []
   };
 
-  if (!exists) return report;
+  if (!location.exists) return report;
 
   report.presentFiles = countFiles(dir);
   report.nominalBytes = sumFileSizes(dir);
   if (options.checkPlayable !== false) Object.assign(report, checkVideosIn(dir));
 
   // 用存储层自己的校验逻辑，避免两处实现不一致
-  const storage = new TorrentStorage(meta, { savePath });
+  const storage = new TorrentStorage(meta, {
+    savePath,
+    seriesRoot: location.seriesRoot,
+    singleFileDir: location.singleFileDir
+  });
   try {
     storage.resumeScan();
     report.pieceDone = storage.verified.size;
@@ -186,16 +280,27 @@ export function saveInventory(savePath: string, entries: InventoryEntry[], metad
 export function scanForLocalItems(
   savePath: string,
   metadataDir?: string,
-  ignoreNames: readonly string[] = []
+  ignoreNames: readonly string[] = [],
+  seriesDir?: string
 ): { added: InventoryEntry[]; entries: InventoryEntry[] } {
   const entries = loadInventory(savePath, metadataDir);
   const known = new Set(entries.map((e) => e.path));
   const managed = new Set(loadCachedMetas(savePath, metadataDir).map((m) => sanitize(m.name)));
   const added: InventoryEntry[] = [];
 
+  /*
+   * 扫描范围：启用了「番剧目录」就扫它里面，否则扫下载根目录。
+   *
+   * 这里必须跟着归纳规则走 —— 否则在 savePath 下只会看到一个叫「番剧」的
+   * 大目录，被整条登记成「本地内容」，而里面每一部番都看不到。
+   */
+  const seriesRoot = seriesDir?.trim();
+  const scanDir = seriesRoot && existsSync(join(savePath, sanitize(seriesRoot))) ? join(savePath, sanitize(seriesRoot)) : savePath;
+  const prefix = scanDir === savePath ? '' : sanitize(seriesRoot as string);
+
   let dirs: string[] = [];
   try {
-    dirs = readdirSync(savePath, { withFileTypes: true })
+    dirs = readdirSync(scanDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && entry.name !== '.bangumi-meta')
       .map((entry) => entry.name);
   } catch {
@@ -203,10 +308,11 @@ export function scanForLocalItems(
   }
 
   for (const name of dirs) {
-    if (known.has(name) || managed.has(name)) continue;
+    const path = prefix === '' ? name : `${prefix}/${name}`;
+    if (known.has(path) || known.has(name) || managed.has(name)) continue;
     if (ignoreNames.includes(name)) continue;
 
-    const full = join(savePath, name);
+    const full = join(scanDir, name);
     if (countFiles(full) === 0) continue;
     /*
      * 跳过「程序自己的目录」。
@@ -220,7 +326,7 @@ export function scanForLocalItems(
 
     const entry: InventoryEntry = {
       name,
-      path: name,
+      path,
       kind: detectKind(full)
     };
     entries.push(entry);
@@ -269,6 +375,8 @@ export function verifyLocal(entry: InventoryEntry, savePath: string, options: { 
     source: 'local',
     infoHash: '',
     name: entry.name,
+    dir,
+    dirExists: existsSync(dir),
     expectedFiles: 0,
     presentFiles: 0,
     pieceTotal: 0,
@@ -354,7 +462,7 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
   const added: string[] = [];
 
   if (options.addLocal) {
-    const scan = scanForLocalItems(options.savePath, options.metadataDir, options.ignoreDirs ?? []);
+    const scan = scanForLocalItems(options.savePath, options.metadataDir, options.ignoreDirs ?? [], options.seriesDir);
     if (scan.added.length > 0) {
       saveInventory(options.savePath, scan.entries, options.metadataDir);
       for (const entry of scan.added) added.push(entry.name);
@@ -362,12 +470,19 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
   }
 
   for (const meta of metas) {
-    const report = verifyTorrent(meta, options.savePath, { checkPlayable: options.checkPlayable });
+    const report = verifyTorrent(meta, options.savePath, {
+      checkPlayable: options.checkPlayable,
+      seriesDir: options.seriesDir
+    });
     reports.push(report);
 
     if (options.cleanEmpty && report.empty && report.presentFiles > 0) {
-      const dir = join(options.savePath, sanitize(meta.name));
-      // 只删「一个有效分片都没有」的目录：那必然是历次尝试留下的空壳
+      /*
+       * 删的是**实际找到的那个目录**，不是按规则猜出来的路径。
+       * 这里如果猜错（例如单文件种子的目录名是发布标题），
+       * 就会去删一个别的番剧的目录 —— 比不删危险得多。
+       */
+      const dir = report.dir;
       log.warn(`删除空壳目录（0 个有效分片，名义 ${formatSize(report.nominalBytes)}）：${dir}`);
       rmSync(dir, { recursive: true, force: true });
       removed.push(dir);
@@ -411,10 +526,13 @@ export function printVerifyReport(report: TorrentVerifyReport): void {
   const state = report.complete
     ? '已下完'
     : report.empty
-      ? '没有任何有效数据（空壳）'
+      ? report.dirExists
+        ? '没有任何有效数据（空壳）'
+        : '目录还没建（还没下过）'
       : `下了一半：${percent}%`;
 
   log.info(`${flag} 《${report.name}》`);
+  if (!report.dirExists) log.info(`     找的是：${report.dir}`);
   log.info(
     `     ${state}｜有效数据 ${formatSize(report.bytesDone)} / ${formatSize(report.bytesTotal)}` +
       `（${report.pieceDone}/${report.pieceTotal} 分片）｜文件 ${report.presentFiles}/${report.expectedFiles} 个`
