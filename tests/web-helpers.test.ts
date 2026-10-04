@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultConfig } from '../src/config.js';
@@ -241,5 +241,68 @@ describe('计划任务退出码：不要把人吓一跳', () => {
 
   it('真正的异常仍然报异常', () => {
     expect(describeResult(0x80070005)).toContain('异常退出');
+  });
+});
+
+describe('跨进程去重：同一个种子不许被两个进程同时下', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const makeFile = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'inflight-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'data'), { recursive: true });
+    return join(dir, 'data', 'downloading.json');
+  };
+
+  it('别的进程占着就认领不到（并给出占位者）', async () => {
+    const { claimDownload, releaseDownload, listInflight } = await import('../src/core/inflight.js');
+    const file = makeFile();
+    const key = 'a'.repeat(40);
+
+    // 模拟「另一个还活着的进程」：用 pid 1（一定存在）
+    const other = { key, title: '别的进程在下的种子', pid: 1, startedAt: new Date().toISOString() };
+    writeFileSync(file, JSON.stringify({ version: 1, entries: [other] }));
+
+    const result = claimDownload(file, { key, title: '我这条' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.holder.pid).toBe(1);
+
+    // release 只释放自己的认领，不会去动别的进程的记录
+    releaseDownload(file, key);
+    expect(claimDownload(file, { key, title: '我这条' }).ok).toBe(false);
+
+    // 自己认领：重复认领视为成功（同一轮重试很常见），释放后就能再认领
+    const mineFile = makeFile();
+    expect(claimDownload(mineFile, { key, title: '我这条' }).ok).toBe(true);
+    expect(claimDownload(mineFile, { key, title: '我这条' }).ok).toBe(true);
+    expect(listInflight(mineFile)).toHaveLength(1);
+    releaseDownload(mineFile, key);
+    expect(listInflight(mineFile)).toHaveLength(0);
+  });
+
+  it('进程已经不在的僵尸记录会被清掉，不挡路', async () => {
+    const { claimDownload, listInflight } = await import('../src/core/inflight.js');
+    const file = makeFile();
+    const key = 'b'.repeat(40);
+
+    // pid 用一个几乎不可能存在的值
+    writeFileSync(
+      file,
+      JSON.stringify({ version: 1, entries: [{ key, title: '崩溃残留', pid: 999_999_999, startedAt: new Date().toISOString() }] })
+    );
+
+    expect(listInflight(file)).toHaveLength(0);
+    expect(claimDownload(file, { key, title: '我这条' }).ok).toBe(true);
+  });
+
+  it('按 infohash 算 key：同一集的不同磁力参数视为同一个种子', async () => {
+    const { downloadKeyOf } = await import('../src/core/inflight.js');
+    const hash = 'c'.repeat(40);
+    expect(downloadKeyOf({ magnet: `magnet:?xt=urn:btih:${hash}&dn=a`, title: 'A' })).toBe(hash);
+    expect(downloadKeyOf({ magnet: `magnet:?xt=urn:btih:${hash}&dn=b`, title: 'B' })).toBe(hash);
+    expect(downloadKeyOf({ title: '没有磁力' })).toBe('t:没有磁力');
   });
 });

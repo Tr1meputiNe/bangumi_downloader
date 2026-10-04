@@ -6,6 +6,7 @@ import { TorrentDownloader, type DownloadProgress } from '../bittorrent/download
 import { selectFileIndexes, downloadTorrentBytes } from './push.js';
 import { metaFromInfoBytes, parseTorrentFile, type TorrentMeta } from '../bittorrent/metainfo.js';
 import { locateTorrent } from './verify.js';
+import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 
@@ -51,6 +52,8 @@ export type FallbackOptions = {
    * 做种多得多的字幕组版本根本没机会被试到。
    */
   resumeSliceMs?: number;
+  /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
+  configPath?: string;
   /** 下载过程中的进度回调（界面上的「正在下载」用它）。 */
   onProgress?: (info: {
     title: string;
@@ -559,6 +562,33 @@ async function runAttempt(
   let files: string[] = [];
 
   /*
+   * 认领这个种子：别的进程（网页界面的下载队列）正在下同一个种子时直接跳过。
+   * 不认领的话两边会各下一份、带宽对半分，还可能落成两个目录 —— 实测出现过。
+   */
+  const claimKey = downloadKeyOf({
+    magnet: candidate.result.magnet,
+    torrentUrl: candidate.result.torrentUrl ?? undefined,
+    title: candidate.result.title
+  });
+  const inflightFile = inflightPath(options.configPath);
+  const claim = claimDownload(inflightFile, { key: claimKey, title: candidate.result.title });
+  if (!claim.ok) {
+    log.info(
+      `这个种子正在被另一个进程下载（${claim.holder.title.slice(0, 40)}，pid ${claim.holder.pid}），这条跳过`
+    );
+    return {
+      completed: false,
+      infoHash: claimKey,
+      bytesWritten: 0,
+      receivedBytes: 0,
+      throughput: 0,
+      reason: '同一个种子正在被另一个进程下载',
+      files: [],
+      savePath: options.savePath
+    };
+  }
+
+  /*
    * 续传时的「有没有在动」看门狗。
    *
    * 死种的典型表现是：磁盘上有历史数据，连上去之后一个字节都拿不到。
@@ -599,6 +629,7 @@ async function runAttempt(
     bytes = Math.max(bytes, latestDownloaded ?? 0);
   } finally {
     if (stallGuard) clearInterval(stallGuard);
+    releaseDownload(inflightFile, claimKey);
   }
 
   /*

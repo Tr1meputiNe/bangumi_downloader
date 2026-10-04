@@ -509,6 +509,8 @@ async function downloadForGap(gap: AnimeGap, options: {
   isDone?: (episode: number) => boolean;
   /** 确认下完之后回调，用来记住「别再下了」。 */
   onCompleted?: (episodes: number[]) => void;
+  /** config.json 的路径（跨进程去重用）。 */
+  configPath?: string;
   /** 下载进度（界面展示用）。 */
   onProgress?: (info: {
     title: string;
@@ -622,6 +624,7 @@ async function downloadForGap(gap: AnimeGap, options: {
   const result = await downloadUntilComplete({
     candidates: [...outcome.ranked, ...relaxed],
     config,
+    configPath: options.configPath,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,
@@ -705,6 +708,7 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
     try {
       const outcome = await runForEntry(entry, {
         config,
+        configPath: options.configPath,
         savePath,
         dryRun: options.dryRun,
         maxPerSubject,
@@ -761,6 +765,8 @@ async function runForEntry(
   entry: WatchEntry,
   options: {
     config: AppConfig;
+    /** config.json 的路径（跨进程去重用）。 */
+    configPath?: string;
     savePath: string;
     dryRun: boolean;
     maxPerSubject: number;
@@ -855,6 +861,7 @@ async function runForEntry(
   const result = await downloadUntilComplete({
     candidates: outcome.ranked,
     config,
+    configPath: options.configPath,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,

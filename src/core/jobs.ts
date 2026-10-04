@@ -81,6 +81,8 @@ type JobDeps = {
   config: AppConfig;
   /** qbittorrent 后端才需要。 */
   qbittorrent?: QbittorrentClient;
+  /** config.json 的路径（跨进程去重用）。 */
+  configPath?: string;
 };
 
 const MAX_MESSAGES = 40;
@@ -278,6 +280,7 @@ export class JobQueue extends EventEmitter {
       const result = await dispatchDownload(
         {
           config: this.#deps.config,
+          configPath: this.#deps.configPath,
           qbittorrent: this.#deps.qbittorrent,
           signal: controller.signal,
           onLog: hooks.onLog,

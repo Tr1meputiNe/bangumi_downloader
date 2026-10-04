@@ -21,6 +21,8 @@ const log = logger('retry');
 export type RetryOptions = {
   candidates: readonly ScoredCandidate[];
   config: AppConfig;
+  /** config.json 的路径（跨进程去重用）。 */
+  configPath?: string;
   episodes: number[];
   savePath: string;
   signal?: AbortSignal;
@@ -88,6 +90,7 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
 
     try {
       last = await downloadWithFallback({
+        configPath: options.configPath,
         candidates,
         config: options.config,
         episodes: options.episodes,

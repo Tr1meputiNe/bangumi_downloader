@@ -6,6 +6,7 @@ import { TorrentDownloader } from '../bittorrent/downloader.js';
 import { magnetInfoHash } from '../util/magnet.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
+import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 
 const log = logger('dispatch');
 
@@ -56,6 +57,8 @@ export type DispatchDeps = {
    * （引擎会关掉连接，但已经校验通过的分片留在磁盘上，继续时接着下）。
    */
   signal?: AbortSignal;
+  /** config.json 的路径（跨进程去重用）。 */
+  configPath?: string;
 };
 
 export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Promise<DispatchResult> {
@@ -65,11 +68,16 @@ export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Pr
     const result = await pushRelease(deps.qbittorrent, deps.config, input);
     return { ...result, backend };
   }
-  return await downloadWithBuiltin(deps.config, input, {
-    onLog: deps.onLog,
-    onProgress: deps.onProgress,
-    signal: deps.signal
-  });
+  return await downloadWithBuiltin(
+    deps.config,
+    input,
+    {
+      onLog: deps.onLog,
+      onProgress: deps.onProgress,
+      signal: deps.signal
+    },
+    deps.configPath
+  );
 }
 
 /**
@@ -86,12 +94,50 @@ export async function downloadWithBuiltin(
     onLog?: (message: string) => void;
     onProgress?: DispatchDeps['onProgress'];
     signal?: AbortSignal;
-  } = {}
+  } = {},
+  /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
+  configPath?: string
 ): Promise<DispatchResult> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
     throw new Error('内置下载后端需要配置 download.savePath（下载到哪个目录）');
   }
+
+  /*
+   * 认领这个种子。
+   *
+   * 这条是网页那条路（任务队列），而计划任务触发的 auto 是另一个进程 ——
+   * 两边的锁互相看不见，不认领的话同一个种子会被同时下两遍：
+   * 带宽对半分，还可能落成两个目录。实测被用户抓到过「两个一起在下」。
+   */
+  const claimKey = downloadKeyOf({ magnet: input.magnet, torrentUrl: input.torrentUrl, title: input.title });
+  const inflightFile = inflightPath(configPath);
+  const claim = claimDownload(inflightFile, { key: claimKey, title: input.title });
+  if (!claim.ok) {
+    throw new Error(
+      `同一个种子已经在别处下载了（${claim.holder.title.slice(0, 40)}，pid ${claim.holder.pid}，` +
+        `开始于 ${claim.holder.startedAt}）。等它下完再试，或者先把它停掉。`
+    );
+  }
+
+  try {
+    return await downloadWithBuiltinClaimed(config, input, hooks);
+  } finally {
+    releaseDownload(inflightFile, claimKey);
+  }
+}
+
+async function downloadWithBuiltinClaimed(
+  config: AppConfig,
+  input: PushInput,
+  hooks: {
+    onLog?: (message: string) => void;
+    onProgress?: DispatchDeps['onProgress'];
+    signal?: AbortSignal;
+  }
+): Promise<DispatchResult> {
+  const savePath = config.download.savePath || config.qbittorrent.savePath;
+  if (!savePath) throw new Error('内置下载后端需要配置 download.savePath（下载到哪个目录）');
 
   const episodes = input.episodes ?? [];
   const infoHash = input.magnet ? magnetInfoHash(input.magnet) : null;

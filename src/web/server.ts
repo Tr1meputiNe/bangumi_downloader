@@ -1081,7 +1081,7 @@ function handleLogs(deps: WebDeps, url: URL, response: ServerResponse): void {
 
 /** 惰性创建队列：测试里可以不传，直接用一个内部实例。 */
 function ensureJobs(deps: WebDeps): JobQueue {
-  deps.jobs ??= new JobQueue({ config: deps.config, qbittorrent: deps.qbittorrent });
+  deps.jobs ??= new JobQueue({ config: deps.config, configPath: deps.configPath, qbittorrent: deps.qbittorrent });
   return deps.jobs;
 }
 
