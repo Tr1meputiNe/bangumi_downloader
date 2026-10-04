@@ -15,6 +15,7 @@ import { buildTaskSchedule, syncTaskSchedule, type SyncResult } from './task-sch
 import {
   applyPlan,
   autoSchedulePath,
+  clearStaleRunning,
   broadcastTimeOf,
   clearRunning,
   publishRunning,
@@ -136,7 +137,11 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
    * 白搜一遍片源站。这里先看计划，没到点就**一次网络请求都不发**直接退出。
    */
   let state: AutoScheduleState | null = null;
-  if (options.configPath) state = loadAutoSchedule(schedulePath, now);
+  if (options.configPath) {
+    // 上一轮如果被杀掉，「正在下载」会残留在计划文件里，界面会一直显示 0%
+    if (clearStaleRunning(schedulePath)) log.info('清掉了上一次残留的「正在下载」记录（那个进程已经不在了）');
+    state = loadAutoSchedule(schedulePath, now);
+  }
 
   if (respectSchedule && options.configPath) {
     const decision = decideRun(state, now, { force: false });

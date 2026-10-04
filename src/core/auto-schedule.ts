@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { logger } from '../util/log.js';
+import { isProcessAlive } from './inflight.js';
 
 const log = logger('schedule');
 
@@ -82,6 +83,8 @@ export type AutoScheduleState = {
 
 export type RunningDownload = {
   title: string;
+  /** 写这条记录的进程号：进程已经不在了就说明这是残留，不该再显示成「正在下载」。 */
+  pid?: number;
   /** 0~1。 */
   ratio: number;
   /** 已校验通过的字节 / 总字节。 */
@@ -117,11 +120,37 @@ export function emptyScheduleState(now: Date): AutoScheduleState {
   };
 }
 
-/** 把「正在下载」写进计划文件（供界面展示），并返回一个收尾用的函数。 */
+/** 把「正在下载」写进计划文件（供界面展示）。 */
 export function publishRunning(path: string, info: RunningDownload): void {
   const state = loadAutoSchedule(path);
-  state.running = info;
+  state.running = { ...info, pid: process.pid };
   saveAutoSchedule(path, state);
+}
+
+/**
+ * 现在**真的**在下载吗。
+ *
+ * 为什么要判进程：下载进程可能被杀（重启、断电、我手动 taskkill），
+ * 而「正在下载」这条记录留在文件里，界面就会一直显示「正在下载 0%」，
+ * 看着像卡死了。进程不在了就当没有，并顺手把残留清掉。
+ */
+export function effectiveRunning(state: AutoScheduleState | null): RunningDownload | null {
+  const running = state?.running ?? null;
+  if (!running) return null;
+  if (typeof running.pid !== 'number') return null;
+  if (running.pid === process.pid) return running;
+  if (isProcessAlive(running.pid)) return running;
+  return null;
+}
+
+/** 清掉残留的「正在下载」（进程已经不在的那种）。 */
+export function clearStaleRunning(path: string): boolean {
+  const state = loadAutoSchedule(path);
+  if (!state.running) return false;
+  if (effectiveRunning(state) !== null) return false;
+  state.running = null;
+  saveAutoSchedule(path, state);
+  return true;
 }
 
 /** 下载结束后清掉「正在下载」。 */

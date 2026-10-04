@@ -13,6 +13,7 @@ import {
   loadAutoSchedule,
   markEpisodesDone,
   doneKey,
+  effectiveRunning,
   planSchedule,
   planWithoutPlanner,
   pruneDone,
@@ -500,5 +501,36 @@ describe('计划任务触发器与程序自己的检查点对齐', () => {
     const plan = planSchedule([subject('冷门番', 3, '2026-10-04', '16:00')], now, OPTIONS);
     expect(plan.triggers).toEqual([]);
     expect(plan.stale).toHaveLength(1);
+  });
+});
+
+describe('「正在下载」不能骗人：写它的进程不在了就不该再显示', () => {
+  const base = () => ({
+    ...emptyScheduleState(at('2026-10-04 20:00')),
+    running: {
+      title: '某部番 第 1 集',
+      ratio: 0.5,
+      downloadedBytes: 100,
+      totalBytes: 200,
+      speed: 1024,
+      peers: 3,
+      startedAt: at('2026-10-04 19:50').toISOString(),
+      updatedAt: at('2026-10-04 20:00').toISOString()
+    }
+  });
+
+  it('进程已经不在（被 kill、重启）→ 视为没有在下载', () => {
+    // 实测踩过：进程被杀之后界面一直显示「正在下载 0%」，看着像卡死
+    const state = { ...base(), running: { ...base().running!, pid: 999_999_999 } };
+    expect(effectiveRunning(state)).toBeNull();
+  });
+
+  it('进程还活着 → 正常显示', () => {
+    const state = { ...base(), running: { ...base().running!, pid: process.pid } };
+    expect(effectiveRunning(state)?.title).toContain('某部番');
+  });
+
+  it('老记录没有 pid 字段 → 当作残留（宁可少显示，也不要挂着假的进度）', () => {
+    expect(effectiveRunning(base())).toBeNull();
   });
 });
