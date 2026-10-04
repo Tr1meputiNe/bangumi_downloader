@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:net';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { BLOCK_SIZE, PeerConnection, generatePeerId, hexToBytes, type PeerMessage } from './peer.js';
 import { fetchMetadataFromPeer, sleep } from './metadata.js';
 import { DhtClient } from './dht.js';
@@ -117,6 +117,8 @@ export class TorrentDownloader extends EventEmitter {
   #options: DownloadOptions;
   #meta: TorrentMeta | null = null;
   #storage: TorrentStorage | null = null;
+  /** 「还没下完」标记文件的路径（下完要删掉）。 */
+  #markerPath: string | null = null;
   #peers = new Map<string, PeerState>();
   #peerPool = new Map<string, PeerAddress>();
   #dht: DhtClient | null = null;
@@ -214,6 +216,17 @@ export class TorrentDownloader extends EventEmitter {
       const wanted = this.#storage.wantedPieces();
       if (wanted.length === 0) throw new Error('选中的文件没有对应的分片，无法下载');
 
+      /*
+       * 落一个「还没下完」的标记文件。
+       *
+       * 为什么需要：存储层为了让断点续传能把文件预分配到完整长度，
+       * 所以没下完的文件在资源管理器里**大小是满的** —— 双击播放必然报错，
+       * 而人看到的只是「文件在、大小对、播不了」，很像文件损坏。
+       * 实测就是这样的误会。留个明显的标记，打开目录一眼就知道原因；
+       * 下完了就删掉。
+       */
+      this.#writeProgressMarker();
+
       const reused = this.#storage.resumeScan();
       if (reused > 0) {
         this.#log(`已有 ${reused} 个分片在磁盘上通过校验，跳过重下`);
@@ -254,6 +267,7 @@ export class TorrentDownloader extends EventEmitter {
       const files = this.#storage.selectedPaths();
       const bytesWritten = this.#storage.bytesWritten;
 
+      this.#clearProgressMarker();
       this.#log(`下载完成：${files.length} 个文件，用时 ${formatDuration(elapsedMs)}`);
 
       return {
@@ -270,6 +284,55 @@ export class TorrentDownloader extends EventEmitter {
       this.#options.signal?.removeEventListener('abort', abort);
       await this.#cleanup();
     }
+  }
+
+  /**
+   * 写「还没下完」标记：直接放在内容目录里，用中文文件名，肉眼可见。
+   *
+   * 标记文件带实时进度，用户打开目录看到的第一眼就能明白为什么播不了。
+   */
+  #writeProgressMarker(): void {
+    const storage = this.#storage;
+    if (!storage || storage.files.length === 0) return;
+
+    const first = storage.files.find((file) => file.selected) ?? storage.files[0];
+    if (!first) return;
+    const dir = dirname(first.absolutePath);
+
+    try {
+      mkdirSync(dir, { recursive: true });
+      const marker = join(dir, '⚠ 还没下完，现在播放会失败.txt');
+      const percent = ((storage.verified.size / Math.max(1, storage.wantedPieces().length)) * 100).toFixed(1);
+      writeFileSync(
+        marker,
+        [
+          '这个目录里的文件**还没下完**。',
+          '',
+          '文件大小看着是满的（存储层为了断点续传会预分配到完整长度），',
+          '但里面大部分还是空的 —— 现在用播放器打开会报错，这不是文件损坏。',
+          '',
+          `进度：${storage.verified.size}/${storage.wantedPieces().length} 个分片（${percent}%）`,
+          `更新时间：${new Date().toLocaleString()}`,
+          '',
+          '下完之后这个标记文件会自动消失。想确认真实进度，',
+          '也可以在网页界面的「片库」页点「核对」（分片哈希校验，文件大小骗不了它）。'
+        ].join('\n'),
+        'utf8'
+      );
+      this.#markerPath = marker;
+    } catch {
+      /* 标记写不进去不影响下载 */
+    }
+  }
+
+  #clearProgressMarker(): void {
+    if (this.#markerPath === null) return;
+    try {
+      rmSync(this.#markerPath, { force: true });
+    } catch {
+      /* 删不掉也无所谓 */
+    }
+    this.#markerPath = null;
   }
 
   /** 把 info 字典存到缓存目录，供下次离线判断「是否已有进度」。 */
