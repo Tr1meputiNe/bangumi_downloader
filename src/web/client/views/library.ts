@@ -258,6 +258,7 @@ function summarizeVerify(result: unknown) {
   const value = result as VerifyTaskResult;
   return html`
     · 共 ${value.reports.length} 项，已下完 ${value.completeCount}，空壳 ${value.emptyCount}
+    ${value.missingCount > 0 ? html` · ${value.missingCount} 项目录不存在（没下过或已清理）` : null}
     ${value.unplayableCount > 0 ? html` · <span class="warn">${value.unplayableCount} 个视频有问题</span>` : null}
     ${value.removed.length > 0 ? html` · 已清理 ${value.removed.length} 个空壳目录` : null}
   `;

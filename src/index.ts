@@ -488,14 +488,17 @@ async function cmdVerify(
   const torrents = result.reports.filter((report) => report.source === 'torrent');
   const locals = result.reports.filter((report) => report.source === 'local');
   const done = torrents.filter((report) => report.complete).length;
-  const empty = torrents.filter((report) => report.empty).length;
+  // 只统计「目录还在、但一个有效分片都没有」的；目录不存在的单独算
+  const empty = torrents.filter((report) => report.empty && report.dirExists).length;
+  const missing = torrents.filter((report) => !report.dirExists).length;
 
   const videosChecked = result.reports.reduce((sum, report) => sum + report.videosChecked, 0);
   const videosUnplayable = result.reports.reduce((sum, report) => sum + report.videosUnplayable, 0);
 
   log.info(
-    `共 ${result.reports.length} 项：本项目下载 ${torrents.length} 个（已下完 ${done}，空壳 ${empty}）` +
-      `｜本地内容 ${locals.length} 个`
+    `共 ${result.reports.length} 项：本项目下载 ${torrents.length} 个（已下完 ${done}，空壳 ${empty}` +
+      (missing > 0 ? `，目录不存在 ${missing}` : '') +
+      `）｜本地内容 ${locals.length} 个`
   );
   if (options.checkPlayable && videosChecked > 0) {
     if (videosUnplayable === 0) {

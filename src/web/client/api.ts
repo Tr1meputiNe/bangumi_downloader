@@ -184,6 +184,8 @@ export type VerifyTaskResult = {
   totalBytes: number;
   completeCount: number;
   emptyCount: number;
+  /** 目录不存在的项数（元数据还在、内容已被清理）。 */
+  missingCount: number;
   unplayableCount: number;
 };
 

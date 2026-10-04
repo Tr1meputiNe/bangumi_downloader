@@ -205,6 +205,8 @@ export type VerifyTaskResult = {
   totalBytes: number;
   completeCount: number;
   emptyCount: number;
+  /** 目录不存在的项数（元数据还在、内容已被清理）。 */
+  missingCount: number;
   unplayableCount: number;
 };
 
@@ -348,13 +350,22 @@ export async function runVerifyTask(
   if (relocated > 0) saveInventory(savePath, allInventory);
 
   const completeCount = reports.filter((item) => item.source === 'torrent' && item.complete).length;
-  const emptyCount = reports.filter((item) => item.empty).length;
+  /*
+   * 「空壳」和「目录不存在」是两回事，别混成一个数。
+   *
+   * 元数据缓存里可能留着早就删掉的种子记录（下过、后来清理了，或者试着下过但
+   * 目录从没建起来）。那些条目 `dirExists=false`，报成「空壳」会让人以为
+   * 磁盘上有空目录占着地方 —— 实测就被这么问过。
+   */
+  const emptyCount = reports.filter((item) => item.empty && item.dirExists).length;
+  const missingCount = reports.filter((item) => !item.dirExists).length;
   const unplayableCount = reports.reduce((sum, item) => sum + item.videosUnplayable, 0);
   const totalBytes = reports.reduce((sum, item) => sum + item.bytesDone, 0);
 
   context.step(`核对完成：${reports.length} 项`, 1);
   context.note(
     `共 ${reports.length} 项，已下完 ${completeCount}，空壳 ${emptyCount}` +
+      (missingCount > 0 ? `，另有 ${missingCount} 项目录不存在（没下过或已删除）` : '') +
       (checkPlayable ? `，抽检发现 ${unplayableCount} 个视频有问题` : '')
   );
 
@@ -367,6 +378,7 @@ export async function runVerifyTask(
     totalBytes,
     completeCount,
     emptyCount,
+    missingCount,
     unplayableCount
   };
 }

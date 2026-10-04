@@ -373,6 +373,7 @@ describe('后台任务接口（核对 / 追番）', () => {
         totalBytes: 0,
         completeCount: 1,
         emptyCount: 0,
+        missingCount: 0,
         unplayableCount: 0
       } satisfies VerifyTaskResult;
     }) as typeof runVerifyTask);
@@ -405,6 +406,7 @@ describe('后台任务接口（核对 / 追番）', () => {
         totalBytes: 0,
         completeCount: 0,
         emptyCount: 0,
+        missingCount: 0,
         unplayableCount: 0
       } satisfies VerifyTaskResult;
     }) as typeof runVerifyTask);
