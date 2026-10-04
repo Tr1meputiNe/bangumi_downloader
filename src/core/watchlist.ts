@@ -31,6 +31,16 @@ export type WatchEntry = {
   completedEpisodes?: number[];
   /** 只从这一集开始追。留空表示从第 1 集开始。 */
   startFrom?: number;
+  /**
+   * 这部番一共多少集（正片）。
+   *
+   * 为什么需要：`lastEpisode` 只记「追到第几集」，没有总数时下一集就是 last+1 ——
+   * 于是「第三季全 13 集、已经追到 13」会被算成「下一集 = 第 14 集」，
+   * 界面上挂着一条根本不存在的第 14 集，Planner 不可用时兜底路径还会一直去找它。
+   * Planner 那边的「在看」里有 eps（总集数），同步时会带过来；
+   * 已经看完、不在「在看」里的番只能手填。
+   */
+  totalEpisodes?: number;
   /** 备注，方便自己认。 */
   note?: string;
   /** false 时暂时跳过这一条。 */
@@ -66,6 +76,7 @@ export function loadWatchlist(path: string): Watchlist {
             ? item.completedEpisodes.filter((value): value is number => typeof value === 'number' && value > 0)
             : undefined,
           startFrom: typeof item.startFrom === 'number' ? item.startFrom : undefined,
+          totalEpisodes: typeof item.totalEpisodes === 'number' ? item.totalEpisodes : undefined,
           note: typeof item.note === 'string' ? item.note : undefined,
           enabled: item.enabled !== false
         }))
@@ -96,16 +107,18 @@ export function upsertWatchEntry(path: string, entry: WatchEntry, originalQuery?
   const key = originalQuery ?? entry.query;
   const index = list.entries.findIndex((item) => item.query === key);
 
+  const previous = index >= 0 ? list.entries[index] : undefined;
   const next: WatchEntry = {
     query: entry.query,
     lastEpisode: entry.lastEpisode,
     completedEpisodes: entry.completedEpisodes,
     startFrom: entry.startFrom,
+    // 总集数没填就沿用原来的（别因为改个备注就把总集数抹掉）
+    totalEpisodes: entry.totalEpisodes ?? previous?.totalEpisodes,
     note: entry.note,
     enabled: entry.enabled !== false
   };
 
-  const previous = index >= 0 ? list.entries[index] : undefined;
   if (previous && typeof next.lastEpisode === 'number' && next.completedEpisodes === undefined) {
     const kept = (previous.completedEpisodes ?? []).filter((episode) => episode <= (next.lastEpisode as number));
     next.completedEpisodes = kept.length > 0 ? kept : undefined;
@@ -127,10 +140,27 @@ export function removeWatchEntry(path: string, query: string): Watchlist {
 }
 
 /** 每条追番「下一集该找第几集」。界面用它显示进度。 */
-export function nextEpisodeOf(entry: WatchEntry): number {
+export function nextEpisodeOf(entry: WatchEntry): number | null {
   const start = typeof entry.startFrom === 'number' && entry.startFrom > 0 ? entry.startFrom : 1;
   const last = typeof entry.lastEpisode === 'number' ? entry.lastEpisode : start - 1;
-  return Math.max(last + 1, start);
+  const next = Math.max(last + 1, start);
+  // 已知总集数且已经追满 -> 没有下一集了（别再去找不存在的第 N+1 集）
+  if (typeof entry.totalEpisodes === 'number' && entry.totalEpisodes > 0 && next > entry.totalEpisodes) {
+    return null;
+  }
+  return next;
+}
+
+/** 这一条是不是已经全部下完了（只在总集数已知时才能判断）。 */
+export function isEntryComplete(entry: WatchEntry): boolean {
+  if (typeof entry.totalEpisodes !== 'number' || entry.totalEpisodes <= 0) return false;
+  const last = typeof entry.lastEpisode === 'number' ? entry.lastEpisode : 0;
+  const done = new Set(entry.completedEpisodes ?? []);
+  if (done.size > 0) {
+    for (let ep = 1; ep <= entry.totalEpisodes; ep += 1) if (!done.has(ep)) return false;
+    return true;
+  }
+  return last >= entry.totalEpisodes;
 }
 
 /**
@@ -153,6 +183,19 @@ export function syncFromPlanner(
   const known = new Set(list.entries.map((entry) => entry.query.trim()));
   const added: string[] = [];
 
+  /*
+   * 已经存在的条目：不动用户的进度/备注/开关，但把「总集数」这个**事实字段**补上
+   * （Planner 说 13 集就是 13 集）。有了它才不会出现「第 14 集」这种幻觉。
+   */
+  let totalsUpdated = 0;
+  for (const entry of list.entries) {
+    const match = subjects.find((subject) => subject.name.trim() === entry.query.trim());
+    if (match && match.eps > 0 && entry.totalEpisodes !== match.eps) {
+      entry.totalEpisodes = match.eps;
+      totalsUpdated += 1;
+    }
+  }
+
   for (const subject of subjects) {
     const query = subject.name.trim();
     if (query === '' || known.has(query)) continue;
@@ -162,6 +205,7 @@ export function syncFromPlanner(
     list.entries.push({
       query,
       startFrom,
+      totalEpisodes: subject.eps > 0 ? subject.eps : undefined,
       enabled: true,
       note: `由 Watch Planner 同步（已看 ${subject.epStatus}/${total.replace('共 ', '').replace(' 集', '')}，未看 ${subject.unwatched}）`
     });
@@ -169,7 +213,8 @@ export function syncFromPlanner(
     added.push(query);
   }
 
-  if (added.length > 0) saveWatchlist(path, list);
+  // 只有真的改了东西才写盘（补了新条目，或者给已有条目补上了总集数）
+  if (added.length > 0 || totalsUpdated > 0) saveWatchlist(path, list);
   return { added, list };
 }
 

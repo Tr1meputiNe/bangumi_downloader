@@ -238,7 +238,12 @@ export type PlannerView = {
 export type WatchEntryView = {
   query: string;
   lastEpisode: number | null;
-  nextEpisode: number;
+  /** 没有下一集时为 null（已知总集数且已追满）。 */
+  nextEpisode: number | null;
+  /** 总集数（留空表示不知道）。 */
+  totalEpisodes?: number | null;
+  /** 全部集数都已下完。 */
+  complete?: boolean;
   completedEpisodes: number[];
   startFrom: number | null;
   note: string;

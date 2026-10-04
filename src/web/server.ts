@@ -10,6 +10,7 @@ import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
 import { dedupeByTitle, expandQueries, filterBySeason, loadAliases, orderBySeason } from '../core/alias.js';
 import {
+  isEntryComplete,
   loadWatchlist,
   nextEpisodeOf,
   removeWatchEntry,
@@ -275,6 +276,8 @@ async function buildOverview(deps: WebDeps) {
       entries: watch.entries.slice(0, 12).map((entry) => ({
         query: entry.query,
         nextEpisode: nextEpisodeOf(entry),
+        totalEpisodes: entry.totalEpisodes ?? null,
+        complete: isEntryComplete(entry),
         lastEpisode: entry.lastEpisode ?? null,
         enabled: entry.enabled !== false
       }))
@@ -871,6 +874,10 @@ async function buildWatchlist(deps: WebDeps) {
       nextEpisode: nextEpisodeOf(entry),
       completedEpisodes: entry.completedEpisodes ?? [],
       startFrom: entry.startFrom ?? null,
+      /** 总集数（留空表示不知道；知道已下满时 nextEpisode 会是 null）。 */
+      totalEpisodes: entry.totalEpisodes ?? null,
+      /** 全部集数都已下完。 */
+      complete: isEntryComplete(entry),
       note: entry.note ?? '',
       enabled: entry.enabled !== false
     })),
@@ -997,6 +1004,7 @@ type WatchlistBody = {
     query?: unknown;
     lastEpisode?: unknown;
     startFrom?: unknown;
+    totalEpisodes?: unknown;
     note?: unknown;
     enabled?: unknown;
   };
@@ -1031,10 +1039,12 @@ async function handleWatchlistEdit(deps: WebDeps, request: IncomingMessage, resp
     } else if (action === 'add' || action === 'update') {
       const lastEpisode = toOptionalPositiveInt(body.entry?.lastEpisode);
       const startFrom = toOptionalPositiveInt(body.entry?.startFrom);
+      const totalEpisodes = toOptionalPositiveInt(body.entry?.totalEpisodes);
       const entry: WatchEntry = {
         query,
         lastEpisode,
         startFrom,
+        totalEpisodes,
         note: typeof body.entry?.note === 'string' && body.entry.note.trim() !== '' ? body.entry.note.trim() : undefined,
         enabled: body.entry?.enabled !== false
       };

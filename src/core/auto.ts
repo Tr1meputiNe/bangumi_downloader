@@ -3,6 +3,7 @@ import { searchAndRank } from './search.js';
 import type { ScoredCandidate } from '../anime/rank.js';
 import { downloadUntilComplete } from './retry.js';
 import {
+  isEntryComplete,
   loadWatchlist,
   markEpisodesCompleted,
   syncFromPlanner,
@@ -740,6 +741,19 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
   for (const entry of list.entries) {
     if (entry.enabled === false) {
       report.skipped.push({ query: entry.query, reason: '清单里标了 enabled: false' });
+      continue;
+    }
+
+    /*
+     * 已知总集数、而且已经追满了就直接跳过，连搜都不用搜。
+     *
+     * 实测的坑：清单里「吹响上低音号 第三季」写着追到第 13 集，而这一季总共就 13 集，
+     * 于是「下一集」算成第 14 集 —— 界面上挂着一条不存在的集数，
+     * 兜底模式下还会一直去搜一个永远不会有的第 14 集。
+     */
+    if (isEntryComplete(entry)) {
+      report.skipped.push({ query: entry.query, reason: `全 ${entry.totalEpisodes} 集都已下完` });
+      log.info(`《${entry.query}》全 ${entry.totalEpisodes} 集都已下完，不用再找`);
       continue;
     }
 

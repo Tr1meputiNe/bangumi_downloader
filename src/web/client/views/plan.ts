@@ -72,7 +72,7 @@ export function PlanView() {
   const [expandedSubject, setExpandedSubject] = useState<number | null>(null);
   const [episodes, setEpisodes] = useState<Record<number, PlannerEpisodeView[]>>({});
   const [episodesLoading, setEpisodesLoading] = useState<number | null>(null);
-  const [form, setForm] = useState({ query: '', lastEpisode: '', startFrom: '', note: '' });
+  const [form, setForm] = useState({ query: '', lastEpisode: '', startFrom: '', totalEpisodes: '', note: '' });
 
   const load = useCallback(async () => {
     try {
@@ -119,12 +119,14 @@ export function PlanView() {
           query: form.query.trim(),
           lastEpisode: form.lastEpisode.trim() === '' ? undefined : Number(form.lastEpisode),
           startFrom: form.startFrom.trim() === '' ? undefined : Number(form.startFrom),
+          // 总集数：填了之后追满就显示「已全部下完」，不会再算出一个不存在的下一集
+          totalEpisodes: form.totalEpisodes.trim() === '' ? undefined : Number(form.totalEpisodes),
           note: form.note.trim()
         };
         const response = originalQuery ? await api.watchlistUpdate(originalQuery, entry) : await api.watchlistAdd(entry);
         setData(response);
         setEditing(null);
-        setForm({ query: '', lastEpisode: '', startFrom: '', note: '' });
+        setForm({ query: '', lastEpisode: '', startFrom: '', totalEpisodes: '', note: '' });
         notify('ok', originalQuery ? '已保存' : `已加入追番：${entry.query}`);
       } catch (err) {
         notify('err', err instanceof Error ? err.message : String(err));
@@ -218,6 +220,7 @@ export function PlanView() {
       query: entry.query,
       lastEpisode: entry.lastEpisode === null ? '' : String(entry.lastEpisode),
       startFrom: entry.startFrom === null ? '' : String(entry.startFrom),
+      totalEpisodes: entry.totalEpisodes === null || entry.totalEpisodes === undefined ? '' : String(entry.totalEpisodes),
       note: entry.note
     });
   }, []);
@@ -434,6 +437,15 @@ export function PlanView() {
           <input
             type="text"
             class="narrow"
+            placeholder="共几集"
+            title="总集数，留空表示不知道。填了之后追满就不会再去找下一集（避免出现不存在的第 14 集）"
+            value=${editing === null ? form.totalEpisodes : ''}
+            onInput=${(event: Event) => setForm({ ...form, totalEpisodes: (event.target as HTMLInputElement).value })}
+            disabled=${editing !== null}
+          />
+          <input
+            type="text"
+            class="narrow"
             placeholder="备注"
             value=${editing === null ? form.note : ''}
             onInput=${(event: Event) => setForm({ ...form, note: (event.target as HTMLInputElement).value })}
@@ -486,7 +498,16 @@ export function PlanView() {
                               value=${form.startFrom}
                               onInput=${(event: Event) => setForm({ ...form, startFrom: (event.target as HTMLInputElement).value })}
                             />
-                            <span class="dim small">集开始</span>
+                            <span class="dim small">集开始，共</span>
+                            <input
+                              type="text"
+                              class="narrow"
+                              placeholder="?"
+                              title="总集数，留空表示不知道"
+                              value=${form.totalEpisodes}
+                              onInput=${(event: Event) => setForm({ ...form, totalEpisodes: (event.target as HTMLInputElement).value })}
+                            />
+                            <span class="dim small">集</span>
                           </div>
                           <input
                             type="text"
@@ -501,7 +522,7 @@ export function PlanView() {
                               class="ghost small"
                               onClick=${() => {
                                 setEditing(null);
-                                setForm({ query: '', lastEpisode: '', startFrom: '', note: '' });
+                                setForm({ query: '', lastEpisode: '', startFrom: '', totalEpisodes: '', note: '' });
                               }}
                             >取消</button>
                           </span>
@@ -512,7 +533,14 @@ export function PlanView() {
                           <span class="ellipsis" title=${entry.query}>${entry.query}</span>
                           <span>
                             <span class="mono">${entry.lastEpisode ?? 0}</span>
-                            <span class="dim small"> 集 · 下一集找第 ${entry.nextEpisode} 集</span>
+                            <span class="dim small"
+                              >/${entry.totalEpisodes ?? '?'} 集 ·
+                              ${entry.complete
+                                ? html`<span class="ok-text">已全部下完</span>`
+                                : entry.nextEpisode === null
+                                  ? html`<span class="dim">没有下一集了</span>`
+                                  : `下一集找第 ${entry.nextEpisode} 集`}</span
+                            >
                             ${entry.completedEpisodes.length > 0
                               ? html`<div class="dim small mono" title="逐集下载记录">已完成 ${compactEpisodes(entry.completedEpisodes)}</div>`
                               : null}

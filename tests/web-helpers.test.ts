@@ -396,3 +396,50 @@ describe('搜索：简称扩展与季数过滤（「京吹2 搜不到」的正�
     expect(filterBySeason(items, null, (item) => item.title)).toHaveLength(2);
   });
 });
+
+describe('总集数：不许再出现「不存在的第 14 集」', () => {
+  it('追满总集数时没有下一集，并判为已下完', async () => {
+    const { nextEpisodeOf, isEntryComplete } = await import('../src/core/watchlist.js');
+    const entry = { query: '吹响上低音号 第三季', lastEpisode: 13, totalEpisodes: 13 };
+    // 实测的坑：没有总集数时下一集算成 14，界面上挂着一条根本不存在的集数，
+    // Planner 不可用时兜底路径还会一直去找它
+    expect(nextEpisodeOf(entry)).toBeNull();
+    expect(isEntryComplete(entry)).toBe(true);
+  });
+
+  it('还没追满时照常给出下一集', async () => {
+    const { nextEpisodeOf, isEntryComplete } = await import('../src/core/watchlist.js');
+    const entry = { query: '某番', lastEpisode: 5, totalEpisodes: 13 };
+    expect(nextEpisodeOf(entry)).toBe(6);
+    expect(isEntryComplete(entry)).toBe(false);
+  });
+
+  it('总集数未知时保持旧行为（不能凭猜测说人家下完了）', async () => {
+    const { nextEpisodeOf, isEntryComplete } = await import('../src/core/watchlist.js');
+    const entry = { query: '某番', lastEpisode: 13 };
+    expect(nextEpisodeOf(entry)).toBe(14);
+    expect(isEntryComplete(entry)).toBe(false);
+  });
+
+  it('逐集记录齐全时也算下完（合集下了一半的情况靠它）', async () => {
+    const { isEntryComplete } = await import('../src/core/watchlist.js');
+    expect(isEntryComplete({ query: '某番', totalEpisodes: 3, completedEpisodes: [1, 2, 3] })).toBe(true);
+    expect(isEntryComplete({ query: '某番', totalEpisodes: 3, completedEpisodes: [1, 3] })).toBe(false);
+  });
+
+  it('从 Planner 同步时会把总集数补进已有条目', async () => {
+    const { syncFromPlanner, loadWatchlist, saveWatchlist } = await import('../src/core/watchlist.js');
+    const dir = mkdtempSync(join(tmpdir(), 'wl-'));
+    const path = join(dir, 'watchlist.json');
+    try {
+      saveWatchlist(path, { version: 1, entries: [{ query: '吹响上低音号 第三季', lastEpisode: 13, note: '手写的' }] });
+      syncFromPlanner(path, [{ name: '吹响上低音号 第三季', eps: 13, epStatus: 13, unwatched: 0 }]);
+      const entry = loadWatchlist(path).entries[0];
+      expect(entry?.totalEpisodes).toBe(13);
+      expect(entry?.lastEpisode).toBe(13);
+      expect(entry?.note).toBe('手写的'); // 用户的东西不动
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
