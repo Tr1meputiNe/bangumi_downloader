@@ -11,6 +11,7 @@ import { downloadWithFallback } from './core/fallback.js';
 import { runAuto } from './core/auto.js';
 import { downloadUntilComplete } from './core/retry.js';
 import { acquireLock } from './core/lock.js';
+import { printVerifyReport, verifyAll } from './core/verify.js';
 import { ensureWatchlistExample, watchlistPath } from './core/watchlist.js';
 import { searchAll } from './trackers/index.js';
 import { startWebServer } from './web/server.js';
@@ -36,6 +37,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   check         检查配置、Planner、片源与 qBittorrent 的连通性
   download      搜索某个关键词，挑出最合适的资源并真正下载（默认下全集）
   auto          按 watchlist.json 自动追番：有新集就下（适合放计划任务里长期跑）
+  verify        用种子分片哈希核对磁盘，报告「真实」下载进度（文件大小会骗人）
   preview       只搜索并打印某部番剧的候选排名（排错用）
   config        打印当前生效的配置
 
@@ -48,6 +50,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --interval <分钟>   auto --daemon 的轮询间隔，默认取 config.intervalMinutes
   --retry <轮数>      download/auto 最多重试几轮（每轮从磁盘进度继续），默认取配置
   --no-retry          只跑一轮，不自动重试
+  --clean-empty       verify 时把「一个有效分片都没有」的空壳目录删掉
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -64,7 +67,18 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   bangumi-downloader run
 `;
 
-type Command = 'serve' | 'search' | 'sync' | 'run' | 'check' | 'preview' | 'config' | 'download' | 'auto' | 'help';
+type Command =
+  | 'serve'
+  | 'search'
+  | 'sync'
+  | 'run'
+  | 'check'
+  | 'preview'
+  | 'config'
+  | 'download'
+  | 'auto'
+  | 'verify'
+  | 'help';
 
 export function resolveCommand(raw: string | undefined): Command {
   switch (raw) {
@@ -95,6 +109,9 @@ export function resolveCommand(raw: string | undefined): Command {
     case 'watch':
     case 'daemon':
       return 'auto';
+    case 'verify':
+    case 'status':
+      return 'verify';
     default:
       return 'help';
   }
@@ -402,6 +419,45 @@ async function cmdDownload(config: AppConfig, configPath: string, options: Downl
   }
 }
 
+/**
+ * 核对磁盘上的真实下载进度。
+ *
+ * 存在的意义：存储层会预分配文件到完整长度，所以「文件大小」完全不能反映进度。
+ * 这一步用种子里的分片哈希逐片校验，回答的是「哪些是真的下好了」。
+ */
+async function cmdVerify(
+  config: AppConfig,
+  options: { infoHash?: string; cleanEmpty: boolean }
+): Promise<number> {
+  const savePath = config.download.savePath || config.qbittorrent.savePath;
+  if (!savePath) {
+    log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
+    return 2;
+  }
+
+  log.info(`核对目录：${savePath}`);
+  const result = await verifyAll({ savePath, infoHash: options.infoHash, cleanEmpty: options.cleanEmpty });
+
+  if (result.reports.length === 0) {
+    log.warn('没有可核对的记录（元数据缓存是空的）。先跑一次 download 或 auto 再来。');
+    return 0;
+  }
+
+  for (const report of result.reports) printVerifyReport(report);
+
+  const done = result.reports.filter((report) => report.complete).length;
+  const empty = result.reports.filter((report) => report.empty).length;
+  log.info(`共 ${result.reports.length} 个种子：已下完 ${done} 个，空壳 ${empty} 个`);
+
+  if (result.removed.length > 0) {
+    log.info(`已清理 ${result.removed.length} 个空壳目录，下次运行会重新下载`);
+  } else if (empty > 0 && !options.cleanEmpty) {
+    log.info('想清掉这些空壳目录可以加 --clean-empty（只有 0 个有效分片的才会被删）');
+  }
+
+  return 0;
+}
+
 /** --retry / --no-retry 与配置的优先级。 */
 function resolveRetryRounds(config: AppConfig, retryFlag: string | undefined, noRetry: boolean): number {
   if (noRetry) return 1;
@@ -660,6 +716,7 @@ export async function main(argv: string[]): Promise<number> {
       interval: { type: 'string' },
       retry: { type: 'string' },
       'no-retry': { type: 'boolean', default: false },
+      'clean-empty': { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -719,6 +776,11 @@ export async function main(argv: string[]): Promise<number> {
         savePath: values['save-path'],
         dryRun: values['dry-run'],
         retryRounds: resolveRetryRounds(config, values.retry, values['no-retry'])
+      });
+    case 'verify':
+      return cmdVerify(config, {
+        infoHash: values.query ?? positionals[1],
+        cleanEmpty: values['clean-empty']
       });
     case 'auto':
       return cmdAuto(config, configPath, {
