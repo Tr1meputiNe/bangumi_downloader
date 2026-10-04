@@ -7,7 +7,6 @@ import { StateStore } from './state/store.js';
 import { runSync, type DownloadMode, type SyncReport } from './core/sync.js';
 import { searchAndRank } from './core/search.js';
 import { dispatchDownload, resolveBackend } from './core/dispatch.js';
-import { downloadWithFallback } from './core/fallback.js';
 import { runAuto } from './core/auto.js';
 import { downloadUntilComplete } from './core/retry.js';
 import { acquireLock } from './core/lock.js';
@@ -52,6 +51,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --no-retry          只跑一轮，不自动重试
   --clean-empty       verify 时把「一个有效分片都没有」的空壳目录删掉
   --add-local         verify 时把下载目录里没记录过的内容（例如自己用别的工具下的）加进本地清单
+  --no-playable       verify 时跳过「文件能不能播」抽检（文件多时更快）
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -107,7 +107,6 @@ export function resolveCommand(raw: string | undefined): Command {
     case 'dl':
       return 'download';
     case 'auto':
-    case 'watch':
     case 'daemon':
       return 'auto';
     case 'verify':
@@ -346,7 +345,6 @@ async function cmdDownload(config: AppConfig, configPath: string, options: Downl
     log.warn(`片源 ${item.tracker} 失败：${item.reason}`);
   }
 
-  const explicit = options.episodes.length > 0;
   const backend = resolveBackend(config);
   const savePath = options.savePath || config.download.savePath || config.qbittorrent.savePath;
 
@@ -428,7 +426,7 @@ async function cmdDownload(config: AppConfig, configPath: string, options: Downl
  */
 async function cmdVerify(
   config: AppConfig,
-  options: { infoHash?: string; cleanEmpty: boolean; addLocal: boolean }
+  options: { infoHash?: string; cleanEmpty: boolean; addLocal: boolean; checkPlayable: boolean }
 ): Promise<number> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
@@ -441,7 +439,8 @@ async function cmdVerify(
     savePath,
     infoHash: options.infoHash,
     cleanEmpty: options.cleanEmpty,
-    addLocal: options.addLocal
+    addLocal: options.addLocal,
+    checkPlayable: options.checkPlayable
   });
 
   if (result.reports.length === 0) {
@@ -459,10 +458,21 @@ async function cmdVerify(
   const locals = result.reports.filter((report) => report.source === 'local');
   const done = torrents.filter((report) => report.complete).length;
   const empty = torrents.filter((report) => report.empty).length;
+
+  const videosChecked = result.reports.reduce((sum, report) => sum + report.videosChecked, 0);
+  const videosUnplayable = result.reports.reduce((sum, report) => sum + report.videosUnplayable, 0);
+
   log.info(
     `共 ${result.reports.length} 项：本项目下载 ${torrents.length} 个（已下完 ${done}，空壳 ${empty}）` +
       `｜本地内容 ${locals.length} 个`
   );
+  if (options.checkPlayable && videosChecked > 0) {
+    if (videosUnplayable === 0) {
+      log.info(`抽检 ${videosChecked} 个视频文件，头部结构与数据分布均正常`);
+    } else {
+      log.warn(`抽检 ${videosChecked} 个视频文件，其中 ${videosUnplayable} 个播不了（详见上面标注）`);
+    }
+  }
 
   if (result.removed.length > 0) {
     log.info(`已清理 ${result.removed.length} 个空壳目录，下次运行会重新下载`);
@@ -733,6 +743,7 @@ export async function main(argv: string[]): Promise<number> {
       'no-retry': { type: 'boolean', default: false },
       'clean-empty': { type: 'boolean', default: false },
       'add-local': { type: 'boolean', default: false },
+      'no-playable': { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -797,7 +808,8 @@ export async function main(argv: string[]): Promise<number> {
       return cmdVerify(config, {
         infoHash: values.query ?? positionals[1],
         cleanEmpty: values['clean-empty'],
-        addLocal: values['add-local']
+        addLocal: values['add-local'],
+        checkPlayable: !values['no-playable']
       });
     case 'auto':
       return cmdAuto(config, configPath, {

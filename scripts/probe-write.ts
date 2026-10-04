@@ -6,7 +6,7 @@
  * 只看内容（Windows 上稀疏文件的 size 会骗人）。
  */
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
+import { mkdtempSync, rmSync, readSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TorrentDownloader } from '../src/bittorrent/downloader.js';

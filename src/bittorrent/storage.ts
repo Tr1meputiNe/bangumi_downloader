@@ -219,6 +219,8 @@ export class TorrentStorage {
 
 /** 去掉路径里对 Windows 非法的字符，避免 mkdir 直接失败。 */
 export function sanitizeSegment(name: string): string {
+  // 控制字符是有意要替换掉的（Windows 文件名不允许），所以这里必须匹配它们
+  // eslint-disable-next-line no-control-regex
   return name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').slice(0, 120) || 'torrent';
 }
 

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { connect, type Socket } from 'node:net';
 import { bencode } from './bencode-encode.js';
 import { bdecode, type BencodeValue } from '../util/bencode.js';
-import { isDict, asBytes } from './metainfo.js';
+import { isDict } from './metainfo.js';
 
 /**
  * BitTorrent 对等连接（BEP 3 + BEP 10 扩展协议）。

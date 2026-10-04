@@ -12,8 +12,6 @@ const dir = mkdtempSync(join(tmpdir(), 'bt-one-'));
 let bytes = 0;
 let peers = 0;
 let pieces = 0;
-let name = '';
-let total = 0;
 let metaOk = false;
 
 const downloader = new TorrentDownloader({
@@ -23,8 +21,6 @@ const downloader = new TorrentDownloader({
   stallTimeoutMs: seconds * 1000,
   onMetadata: (meta) => {
     metaOk = true;
-    name = meta.name;
-    total = meta.totalLength;
     console.log(`元数据 OK：《${meta.name}》${meta.files.length} 个文件，共 ${formatSize(meta.totalLength)}`);
   },
   onProgress: (progress) => {

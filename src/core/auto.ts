@@ -64,7 +64,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   const active = list.entries.filter((entry) => entry.enabled !== false);
   if (active.length === 0) {
     log.warn(`追番清单里 ${list.entries.length} 条全被禁用了（enabled: false），本轮不会做任何事。`);
-    log.warn(`清单文件：${path}　把 enabled 改成 true 或删掉该字段即可启用。`);
+    log.warn(`清单文件：${path} 把 enabled 改成 true 或删掉该字段即可启用。`);
     return report;
   }
 

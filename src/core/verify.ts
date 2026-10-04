@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { metaFromInfoBytes, pieceSize, type TorrentMeta } from '../bittorrent/metainfo.js';
-import { TorrentStorage } from '../bittorrent/storage.js';
+// 目录名归一化复用存储层的实现，避免两处规则不一致
+import { TorrentStorage, sanitizeSegment as sanitize } from '../bittorrent/storage.js';
+import { checkVideoFile, describeIssue, isVideoFile, type PlayabilityIssue } from './video-check.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 
@@ -41,6 +43,12 @@ export type TorrentVerifyReport = {
   complete: boolean;
   /** 有没有文件实际一个数据分片都没有。 */
   empty: boolean;
+  /** 抽检过的视频文件数（只统计有内容的）。 */
+  videosChecked: number;
+  /** 其中有致命问题的（播不了）。 */
+  videosUnplayable: number;
+  /** 有问题的文件明细，最多保留若干条，避免报告刷屏。 */
+  videoIssues: Array<{ file: string; issues: PlayabilityIssue[] }>;
 };
 
 export type VerifyOptions = {
@@ -53,6 +61,8 @@ export type VerifyOptions = {
   cleanEmpty?: boolean;
   /** 把下载目录里没被记录的内容加进本地清单。 */
   addLocal?: boolean;
+  /** 是否做可播性抽检，默认做。 */
+  checkPlayable?: boolean;
 };
 
 export function metadataDirOf(savePath: string, override?: string): string {
@@ -78,7 +88,7 @@ export function loadCachedMetas(savePath: string, metadataDir?: string): Torrent
 }
 
 /** 逐片校验一个种子在磁盘上的真实进度。 */
-export function verifyTorrent(meta: TorrentMeta, savePath: string): TorrentVerifyReport {
+export function verifyTorrent(meta: TorrentMeta, savePath: string, options: { checkPlayable?: boolean } = {}): TorrentVerifyReport {
   const dir = join(savePath, sanitize(meta.name));
   const exists = existsSync(dir);
 
@@ -95,13 +105,17 @@ export function verifyTorrent(meta: TorrentMeta, savePath: string): TorrentVerif
     ratio: 0,
     nominalBytes: 0,
     complete: false,
-    empty: true
+    empty: true,
+    videosChecked: 0,
+    videosUnplayable: 0,
+    videoIssues: []
   };
 
   if (!exists) return report;
 
   report.presentFiles = countFiles(dir);
   report.nominalBytes = sumFileSizes(dir);
+  if (options.checkPlayable !== false) Object.assign(report, checkVideosIn(dir));
 
   // 用存储层自己的校验逻辑，避免两处实现不一致
   const storage = new TorrentStorage(meta, { savePath });
@@ -222,7 +236,7 @@ function detectKind(dir: string): InventoryEntry['kind'] {
 }
 
 /** 对本地条目做基本检查（没有分片哈希，只能看文件层面）。 */
-export function verifyLocal(entry: InventoryEntry, savePath: string): TorrentVerifyReport {
+export function verifyLocal(entry: InventoryEntry, savePath: string, options: { checkPlayable?: boolean } = {}): TorrentVerifyReport {
   const dir = join(savePath, entry.path);
   const report: TorrentVerifyReport = {
     source: 'local',
@@ -237,7 +251,10 @@ export function verifyLocal(entry: InventoryEntry, savePath: string): TorrentVer
     ratio: 0,
     nominalBytes: 0,
     complete: false,
-    empty: true
+    empty: true,
+    videosChecked: 0,
+    videosUnplayable: 0,
+    videoIssues: []
   };
 
   if (!existsSync(dir)) return report;
@@ -246,11 +263,57 @@ export function verifyLocal(entry: InventoryEntry, savePath: string): TorrentVer
   report.nominalBytes = sumFileSizes(dir);
   report.bytesDone = report.nominalBytes;
   report.bytesTotal = report.nominalBytes;
-  report.empty = report.nominalBytes === 0;
+
+  /*
+   * 本地条目没有分片哈希，唯一的证据就是文件内容本身。
+   * 这里逐个视频做可播性检查 —— 比看文件大小可靠得多：
+   * 实测遇到过一个 3.78GB 的目录，13 个文件大小都对，内容却全是零。
+   */
+  if (options.checkPlayable !== false) Object.assign(report, checkVideosIn(dir));
+  report.empty = report.videosChecked === 0 || report.videosUnplayable >= report.videosChecked;
   // 没有分片哈希就没法保证完整性，只能报「有内容」，不声称「已下完」
   report.complete = false;
   report.ratio = report.empty ? 0 : 1;
   return report;
+}
+
+/** 对一个目录里的所有视频做可播性抽检。 */
+function checkVideosIn(dir: string): {
+  videosChecked: number;
+  videosUnplayable: number;
+  videoIssues: Array<{ file: string; issues: PlayabilityIssue[] }>;
+} {
+  const videos: string[] = [];
+  const walk = (current: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (isVideoFile(entry.name)) videos.push(full);
+    }
+  };
+  walk(dir);
+
+  let checked = 0;
+  let unplayable = 0;
+  const issues: Array<{ file: string; issues: PlayabilityIssue[] }> = [];
+
+  for (const file of videos) {
+    const check = checkVideoFile(file);
+    if (check.sizeBytes === 0) continue; // 空文件（例如占位字幕）不算视频
+    checked += 1;
+    if (check.issues.length > 0) {
+      issues.push({ file: file.slice(dir.length + 1), issues: check.issues });
+      if (!check.playable) unplayable += 1;
+    }
+  }
+
+  return { videosChecked: checked, videosUnplayable: unplayable, videoIssues: issues.slice(0, 6) };
 }
 
 /** 核对全部缓存过的种子；可选清掉完全空壳的目录。 */
@@ -272,7 +335,7 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
   }
 
   for (const meta of metas) {
-    const report = verifyTorrent(meta, options.savePath);
+    const report = verifyTorrent(meta, options.savePath, { checkPlayable: options.checkPlayable });
     reports.push(report);
 
     if (options.cleanEmpty && report.empty && report.presentFiles > 0) {
@@ -286,7 +349,7 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
 
   // 本地清单里的条目也一起纳入统计
   for (const entry of loadInventory(options.savePath, options.metadataDir)) {
-    reports.push(verifyLocal(entry, options.savePath));
+    reports.push(verifyLocal(entry, options.savePath, { checkPlayable: options.checkPlayable }));
   }
 
   return { reports, removed, added };
@@ -297,13 +360,23 @@ export function printVerifyReport(report: TorrentVerifyReport): void {
   const percent = (report.ratio * 100).toFixed(1);
 
   if (report.source === 'local') {
-    // 本地条目没有分片哈希，只能说「有内容」，不能说「校验通过」
-    const flag = report.empty ? '⬜' : '📁';
+    const broken = report.videosUnplayable > 0;
+    const flag = report.empty ? '⬜' : broken ? '❌' : '📁';
     log.info(`${flag} 《${report.name}》`);
-    log.info(
-      `     ${report.empty ? '没有任何数据' : `本地文件 ${formatSize(report.nominalBytes)}，${report.presentFiles} 个文件`}` +
-        '（非本项目下载，无分片哈希，不做完整性校验）'
-    );
+    if (report.empty) {
+      log.info('     没有任何能播的内容');
+    } else if (broken) {
+      log.info(
+        `     ${report.videosUnplayable}/${report.videosChecked} 个视频播不了` +
+          `（本地文件 ${formatSize(report.nominalBytes)}，${report.presentFiles} 个文件）`
+      );
+    } else {
+      log.info(
+        `     本地文件 ${formatSize(report.nominalBytes)}，${report.presentFiles} 个文件，` +
+          `${report.videosChecked} 个视频抽检正常（非本项目下载，无分片哈希，不做完整性校验）`
+      );
+    }
+    printVideoIssues(report);
     return;
   }
 
@@ -323,10 +396,27 @@ export function printVerifyReport(report: TorrentVerifyReport): void {
     // 这个提示很关键：文件大小会骗人，用户很容易以为已经下好了
     log.info(`     注意：目录里的文件名义大小是 ${formatSize(report.nominalBytes)}，但那是预分配的结果，不代表已下载`);
   }
+
+  /*
+   * 分片校验和可播性检查是两件事：
+   *   分片校验说「相对种子是否完整」，可播性说「这个文件本身能不能打开」。
+   * 正常情况下分片全过就意味着能播；这里报出问题，说明写入或磁盘层面出了岔子，
+   * 属于必须让人看见的异常。
+   */
+  if (report.videosUnplayable > 0) {
+    log.warn(
+      `     异常：分片校验${report.complete ? '已通过' : '未通过'}，但有 ${report.videosUnplayable} 个视频播不了 —— 请检查磁盘`
+    );
+  }
+  printVideoIssues(report);
 }
 
-function sanitize(name: string): string {
-  return name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').slice(0, 120) || 'torrent';
+/** 打印前几条文件级问题。 */
+function printVideoIssues(report: TorrentVerifyReport): void {
+  for (const item of report.videoIssues) {
+    const reasons = item.issues.map(describeIssue).join('；');
+    log.info(`       · ${item.file.slice(-60)} → ${reasons}`);
+  }
 }
 
 function countFiles(dir: string): number {

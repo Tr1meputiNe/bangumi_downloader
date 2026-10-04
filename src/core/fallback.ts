@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import type { AppConfig } from '../config.js';
 import type { ScoredCandidate } from '../anime/rank.js';
 import { TorrentDownloader, type DownloadProgress } from '../bittorrent/downloader.js';
-import { pickViableCandidate } from './viable.js';
 import { selectFileIndexes, downloadTorrentBytes } from './push.js';
 import { metaFromInfoBytes, parseTorrentFile } from '../bittorrent/metainfo.js';
 import { sanitizeSegment } from '../bittorrent/storage.js';
@@ -78,7 +77,7 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
   if (ordered.length === 0) throw new Error('没有可下载的候选');
 
   let best: FallbackResult | null = null;
-  let resumedTotal = 0;
+  const resumedTotal = 0;
 
   /*
    * 先看看有没有「上次下了一半」的候选。
@@ -544,27 +543,6 @@ export function orderCandidates(candidates: readonly ScoredCandidate[], episodes
     if (episodeDiff !== 0) return episodeDiff;
     return b.score - a.score;
   });
-}
-
-/** 目录下所有文件的总大小。 */
-function directorySize(path: string): number {
-  if (!existsSync(path)) return 0;
-  let total = 0;
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else {
-        try {
-          total += statSync(full).size;
-        } catch {
-          /* 忽略读不到的文件 */
-        }
-      }
-    }
-  };
-  walk(path);
-  return total;
 }
 
 function collectFiles(path: string): string[] {

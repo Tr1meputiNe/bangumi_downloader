@@ -128,7 +128,6 @@ export class TorrentDownloader extends EventEmitter {
   #downloadedSinceSample = 0;
   #lastSampleAt = Date.now();
   #speed = 0;
-  #lastBlocksReceived = 0;
   #lastHeartbeatAt = 0;
   /** 诊断计数：收到的 block 数、校验失败数、写盘失败数。 */
   #blocksReceived = 0;
@@ -1060,7 +1059,6 @@ export class TorrentDownloader extends EventEmitter {
         `累计收到 block ${this.#blocksReceived}（拼装失败 ${this.#verifyFailures}，写盘失败 ${this.#writeFailures}）｜` +
         `最接近完成：${topPieces || '（无）'}｜速度 ${(this.#speed / 1024 / 1024).toFixed(2)} MB/s`
     );
-    this.#lastBlocksReceived = 0;
   }
 
   async #cleanup(): Promise<void> {
