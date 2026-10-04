@@ -457,8 +457,19 @@ export function verifyLocal(
    * 这里逐个视频做可播性检查 —— 比看文件大小可靠得多：
    * 实测遇到过一个 3.78GB 的目录，13 个文件大小都对，内容却全是零。
    */
-  if (options.checkPlayable !== false) Object.assign(report, checkVideosIn(dir));
-  report.empty = report.videosChecked === 0 || report.videosUnplayable >= report.videosChecked;
+  if (options.checkPlayable !== false) {
+    Object.assign(report, checkVideosIn(dir));
+    report.empty = report.videosChecked === 0 || report.videosUnplayable >= report.videosChecked;
+  } else {
+    /*
+     * 没做可播性抽检时，只能按「目录里有没有文件」判断。
+     *
+     * 以前这里不看这个条件：抽检被关掉时 videosChecked 恒为 0，
+     * 于是 `empty` 恒为 true —— 用户那几部 12GB 的剧场版被报成「空壳」，
+     * 看着像内容丢了。判断依据没了就该说「没检查」，而不是编一个结论。
+     */
+    report.empty = report.presentFiles === 0 || report.nominalBytes === 0;
+  }
   // 没有分片哈希就没法保证完整性，只能报「有内容」，不声称「已下完」
   report.complete = false;
   report.ratio = report.empty ? 0 : 1;
