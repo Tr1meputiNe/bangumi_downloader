@@ -14,7 +14,7 @@ import { printVerifyReport, verifyAll } from './core/verify.js';
 import { collectLibrary, printLibrarySummary } from './core/summary.js';
 import { ensureWatchlistExample, watchlistPath } from './core/watchlist.js';
 import { searchAll } from './trackers/index.js';
-import { startWebServer } from './web/server.js';
+import { AlreadyRunningError, openBrowser, startWebServer } from './web/server.js';
 import { notify } from './notify/index.js';
 
 import type { ScoredCandidate } from './anime/rank.js';
@@ -556,9 +556,19 @@ async function cmdServe(config: AppConfig, options: { port?: number; open?: bool
     }
   };
 
-  // 只有真的能下载时才需要连 qBittorrent；连不上也让界面能用来搜索
+  /*
+   * 只有后端真的是 qBittorrent 时才去连它。
+   *
+   * 以前的判断是「只要 download.enabled 不为 false 就连」，于是在用内置引擎时
+   * 也会去连一个根本没装的 qBittorrent，并打出「无法连接 qBittorrent…
+   * 界面仍可使用搜索功能，但下载会失败」这种假警告 —— 实际上点下载是能用的。
+   */
   let qbittorrent: QbittorrentClient | undefined;
-  if (effective.download.enabled !== false) {
+  const backend = resolveBackend(effective);
+
+  if (effective.download.enabled === false) {
+    log.warn('config.json 里 download.enabled = false，界面只能搜索、不能下载');
+  } else if (backend === 'qbittorrent') {
     qbittorrent = new QbittorrentClient(effective.qbittorrent, {
       timeoutMs: effective.trackers.timeoutMs ?? 15000
     });
@@ -570,10 +580,26 @@ async function cmdServe(config: AppConfig, options: { port?: number; open?: bool
       log.warn('界面仍可使用搜索功能，但下载会失败；修好配置后重启本命令即可。');
     }
   } else {
-    log.warn('config.json 里 download.enabled = false，界面只能搜索、不能下载');
+    log.info('下载后端：内置引擎（不需要 qBittorrent）');
   }
 
-  const started = await startWebServer({ config: effective, qbittorrent });
+  let started;
+  try {
+    started = await startWebServer({ config: effective, qbittorrent });
+  } catch (error) {
+    if (error instanceof AlreadyRunningError) {
+      /*
+       * 服务已经在跑（多半是开机自启的那个），这次启动是多余的。
+       * 这不是故障：提示地址、顺手把浏览器打开，然后正常退出。
+       */
+      log.info(error.message);
+      if (effective.web.openBrowser !== false) openBrowser(`http://${error.host}:${error.port}/`);
+      return 0;
+    }
+    // 端口被别的程序占用之类的属于「使用方式」问题，不该甩堆栈给人看
+    log.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
   log.info('按 Ctrl+C 退出');
 
   await new Promise<void>((resolve) => {

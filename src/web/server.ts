@@ -1,6 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { exec } from 'node:child_process';
-import { once } from 'node:events';
 import type { AppConfig } from '../config.js';
 import { QbittorrentClient } from '../qbittorrent/client.js';
 import { searchAndRank } from '../core/search.js';
@@ -359,13 +358,91 @@ export type StartedServer = {
   close: () => Promise<void>;
 };
 
+/**
+ * 「服务已经在跑」——不是故障，只是重复启动。
+ *
+ * 单独一个错误类型，好让调用方把它当成正常情况处理（提示 + 退出码 0），
+ * 而不是当成启动失败报红。
+ */
+export class AlreadyRunningError extends Error {
+  readonly host: string;
+  readonly port: number;
+  readonly existing: { version: string; backend?: string };
+
+  constructor(host: string, port: number, existing: { version: string; backend?: string }) {
+    super(
+      `${host}:${port} 上已经有本程序在运行（版本 ${existing.version}，后端 ${existing.backend ?? '未知'}）。\n` +
+        `直接打开 http://${host}:${port}/ 即可，不需要重复启动。\n` +
+        '要重启的话：先结束那个进程（或跑 uninstall-startup.cmd 停掉常驻任务）再启动。'
+    );
+    this.name = 'AlreadyRunningError';
+    this.host = host;
+    this.port = port;
+    this.existing = existing;
+  }
+}
+
+/** 探测某个地址上是不是已经有本程序在跑（读它的 /api/status）。 */
+async function probeExistingServer(
+  host: string,
+  port: number
+): Promise<{ version: string; backend?: string } | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch(`http://${host}:${port}/api/status`, { signal: controller.signal });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { version?: unknown; backend?: unknown };
+    if (typeof body.version !== 'string') return null;
+    return { version: body.version, backend: typeof body.backend === 'string' ? body.backend : undefined };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 启动 Web 界面并返回实际监听地址。端口传 0 时可以拿到系统分配的端口（测试用）。 */
 export async function startWebServer(deps: WebDeps): Promise<StartedServer> {
   const server = createWebServer(deps);
   const { port, host } = deps.config.web;
 
-  server.listen(port, host);
-  await once(server, 'listening');
+  /*
+   * 监听失败要给一句人话。
+   *
+   * 最常见的情况是端口被占 —— 而这个项目的 Web 界面是常驻后台的
+   * （计划任务 BangumiDownloader-GUI），用户再双击一次启动脚本就会撞上。
+   * 裸抛 EADDRINUSE 会让人以为是程序坏了，所以这里先探测一下：
+   * 如果占用者就是我们自己的服务，直接告诉他「已经在跑了，打开这个地址」。
+   */
+  await new Promise<void>((resolve, reject) => {
+    const onError = async (error: NodeJS.ErrnoException) => {
+      server.off('listening', onListening);
+      if (error.code !== 'EADDRINUSE') {
+        reject(error);
+        return;
+      }
+      const existing = await probeExistingServer(host, port);
+      if (existing) {
+        // 这不是错误：服务本来就在跑（常驻任务），用户只是又启动了一次
+        reject(new AlreadyRunningError(host, port, existing));
+        return;
+      }
+      reject(
+        new Error(
+          `端口 ${port} 已被别的程序占用。\n` +
+            '改 config.json 里的 web.port 换个端口，或结束占用它的进程。'
+        )
+      );
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
 
   const address = server.address();
   const actualPort = address !== null && typeof address === 'object' ? address.port : port;
@@ -384,7 +461,7 @@ export async function startWebServer(deps: WebDeps): Promise<StartedServer> {
   };
 }
 
-function openBrowser(url: string): void {
+export function openBrowser(url: string): void {
   const command =
     process.platform === 'win32'
       ? `start "" "${url}"`

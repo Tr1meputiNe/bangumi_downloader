@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defaultConfig } from '../src/config.js';
-import { startWebServer, type StartedServer } from '../src/web/server.js';
+import { AlreadyRunningError, startWebServer, type StartedServer } from '../src/web/server.js';
 import { clientCss, clientJs } from '../src/web/assets.js';
 import { SearchCache } from '../src/util/cache.js';
 import { selectFileIndexes } from '../src/core/push.js';
@@ -483,6 +483,32 @@ describe('下载库归纳（/api/library）', () => {
     } finally {
       await started.close();
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('重复启动的处理', () => {
+  it('服务已在跑时抛 AlreadyRunningError，而不是裸的 EADDRINUSE', async () => {
+    const config = defaultConfig();
+    config.web = { ...config.web, port: 0, host: '127.0.0.1', openBrowser: false };
+
+    // 先占一个固定端口（模拟「常驻服务已经在跑」）
+    const first = await startWebServer({ config: { ...config, web: { ...config.web, port: 34567 } }, qbittorrent: undefined });
+    try {
+      const second = { ...config, web: { ...config.web, port: 34567 } };
+      await expect(startWebServer({ config: second, qbittorrent: undefined })).rejects.toThrow(AlreadyRunningError);
+
+      // 报错信息要能直接照着做：给出地址，而不是堆栈
+      await startWebServer({ config: second, qbittorrent: undefined }).catch((error: unknown) => {
+        expect(error).toBeInstanceOf(AlreadyRunningError);
+        if (error instanceof AlreadyRunningError) {
+          expect(error.port).toBe(34567);
+          expect(error.message).toContain('http://');
+          expect(error.message).toContain('已经有本程序在运行');
+        }
+      });
+    } finally {
+      await first.close();
     }
   });
 });
