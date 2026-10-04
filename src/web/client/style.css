@@ -931,6 +931,12 @@ input[type='checkbox'] {
   word-break: break-all;
 }
 
+.job-eta {
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
 .job-percent {
   color: var(--accent);
   font-family: var(--mono);

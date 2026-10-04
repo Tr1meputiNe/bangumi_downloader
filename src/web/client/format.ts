@@ -18,6 +18,41 @@ export function formatSpeed(bytesPerSecond: number | null | undefined): string {
 }
 
 /** 百分比：0.1234 → 12.3% */
+/**
+ * 还要多久下完（小字用）。
+ *
+ * 说清楚几件事：
+ *   - 速度是 0 时**不要瞎猜** —— 直接说「暂时没速度，估不出来」，
+ *     比显示一个假的「还要 3 小时」诚实得多
+ *   - 总大小未知时不估
+ *   - 超过一天给「X 天 Y 小时」，别丢一个 26 小时的数字让人自己换算
+ */
+export function formatEta(
+  remainingBytes: number | null,
+  speed: number | null | undefined
+): string | null {
+  if (remainingBytes === null || !Number.isFinite(remainingBytes) || remainingBytes <= 0) return null;
+  const rate = speed ?? 0;
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+
+  const seconds = remainingBytes / rate;
+  if (seconds < 60) return '不到 1 分钟';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `约 ${minutes} 分钟`;
+
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) {
+    // 小时级别只保留整十分钟，避免「约 3 小时 47 分钟」这种假精确
+    const rounded = restMinutes >= 30 ? hours + 1 : hours;
+    return restMinutes >= 10 && restMinutes < 50 ? `约 ${hours} 小时 ${Math.round(restMinutes / 10) * 10} 分` : `约 ${rounded} 小时`;
+  }
+
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours > 0 ? `约 ${days} 天 ${restHours} 小时` : `约 ${days} 天`;
+}
+
 export function formatPercent(ratio: number | null | undefined, digits = 1): string {
   if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '—';
   return `${(ratio * 100).toFixed(digits)}%`;

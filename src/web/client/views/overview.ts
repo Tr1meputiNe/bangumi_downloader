@@ -2,7 +2,15 @@ import { useCallback, useEffect, useState } from 'preact/hooks';
 import { html } from '../html.js';
 import { api, type OverviewResponse } from '../api.js';
 import { Badge, Card, Empty, ProgressBar, Spinner, StatusDot } from '../components.js';
-import { formatClock, formatElapsed, formatSize, formatSpeed, relativeTime, shortenPath } from '../format.js';
+import {
+  formatClock,
+  formatElapsed,
+  formatEta,
+  formatSize,
+  formatSpeed,
+  relativeTime,
+  shortenPath
+} from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
 
 /**
@@ -102,6 +110,15 @@ export function OverviewView() {
                   ? html`<div class="small">
                       正在下载 ${(overview.autoSchedule.running.ratio * 100).toFixed(0)}%
                       ${overview.autoSchedule.running.speed > 0 ? ` · ${formatSpeed(overview.autoSchedule.running.speed)}` : ''}
+                      ${formatEta(
+                        overview.autoSchedule.running.totalBytes - overview.autoSchedule.running.downloadedBytes,
+                        overview.autoSchedule.running.speed
+                      )
+                        ? html` · 还要 ${formatEta(
+                            overview.autoSchedule.running.totalBytes - overview.autoSchedule.running.downloadedBytes,
+                            overview.autoSchedule.running.speed
+                          )}`
+                        : null}
                     </div>`
                   : html`<div class="dim small" title=${overview.autoSchedule.nextReason}>
                       下次检查：${overview.autoSchedule.nextCheckText}

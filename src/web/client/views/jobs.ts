@@ -2,7 +2,15 @@ import { useCallback, useMemo, useState } from 'preact/hooks';
 import { html } from '../html.js';
 import { api, type AutoTaskResult, type JobStatus, type JobView, type TaskView, type VerifyTaskResult } from '../api.js';
 import { Badge, Card, Empty, ProgressBar } from '../components.js';
-import { compactEpisodes, formatClock, formatElapsed, formatSize, formatSpeed, relativeTime } from '../format.js';
+import {
+  compactEpisodes,
+  formatClock,
+  formatElapsed,
+  formatEta,
+  formatSize,
+  formatSpeed,
+  relativeTime
+} from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
 
 const JOB_LABELS: Record<JobStatus, string> = {
@@ -182,6 +190,19 @@ function JobRow({
   detail.push(...[formatSpeed(job.speed), job.peers > 0 ? `${job.peers} 个 peer` : ''].filter((item) => item !== ''));
   if (job.episodes.length > 0) detail.push(`只下第 ${compactEpisodes(job.episodes)} 集`);
 
+  /*
+   * 「还要多久」：进度过半、有速度、总大小已知时才算。
+   * 速度是 0（比如刚连上、或者 peer 都不给数据）时明说估不出来，
+   * 不显示一个凭空的数字。
+   */
+  const remaining =
+    job.totalBytes !== null && job.totalBytes > 0 ? job.totalBytes - job.downloadedBytes : null;
+  const eta = job.status === 'running' ? formatEta(remaining, job.speed) : null;
+  const etaText =
+    job.status !== 'running' || remaining === null || remaining <= 0
+      ? null
+      : eta ?? (job.downloadedBytes > 0 ? '暂时没速度，估不出还要多久' : null);
+
   return html`
     <div class=${`job ${job.status}`}>
       <div class="job-line">
@@ -189,6 +210,7 @@ function JobRow({
         <span class="job-title" title=${job.title}>${job.title}</span>
         ${job.percent !== null && (job.status === 'running' || job.status === 'paused') &&
         html`<span class="job-percent">${job.percent.toFixed(1)}%</span>`}
+        ${etaText ? html`<span class="job-eta" title="按当前速度估算">还要 ${etaText.replace(/^约 /, '').replace(/^暂时没速度.*$/, '暂时没速度')}</span>` : null}
         <span class="job-actions">
           <button type="button" class="icon" title="详情" aria-label="详情" onClick=${onToggle}>${expanded ? '▾' : '▸'}</button>
           ${job.canPause &&

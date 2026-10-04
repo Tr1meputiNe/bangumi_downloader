@@ -443,3 +443,28 @@ describe('总集数：不许再出现「不存在的第 14 集」', () => {
     }
   });
 });
+
+describe('「还要多久」的估算', () => {
+  it('按速度和剩余字节算，并说清楚量级', async () => {
+    const { formatEta } = await import('../src/web/client/format.js');
+    const MB = 1048576;
+    expect(formatEta(30 * MB, 1 * MB)).toBe('不到 1 分钟');
+    expect(formatEta(600 * MB, 1 * MB)).toBe('约 10 分钟');
+    // 34 小时 = 34*3600 MB 按 1 MB/s 下
+    expect(formatEta(20 * 3600 * MB, 1 * MB)).toBe('约 20 小时');
+    expect(formatEta(34 * 3600 * MB, 1 * MB)).toBe('约 1 天 10 小时');
+    expect(formatEta(48 * 3600 * MB, 1 * MB)).toBe('约 2 天');
+    // 大文件 + 慢速度：6.2GB 还剩 300MB，按 250KB/s
+    expect(formatEta(300 * MB, 250 * 1024)).toBe('约 20 分钟');
+  });
+
+  it('没速度时不给数字（宁可说不出来，也不瞎猜）', async () => {
+    const { formatEta } = await import('../src/web/client/format.js');
+    expect(formatEta(100 * 1048576, 0)).toBeNull();
+    expect(formatEta(100 * 1048576, null)).toBeNull();
+    // 剩余为 0 或负数（已下完）也不显示
+    expect(formatEta(0, 1024)).toBeNull();
+    expect(formatEta(-5, 1024)).toBeNull();
+    expect(formatEta(null, 1024)).toBeNull();
+  });
+});
