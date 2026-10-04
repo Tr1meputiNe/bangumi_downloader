@@ -361,3 +361,38 @@ describe('从 Planner 同步本地清单（只补缺，不动已有的）', () =
     expect(loadWatchlist(path).entries[0]?.note).toContain('总集数未知');
   });
 });
+
+describe('搜索：简称扩展与季数过滤（「京吹2 搜不到」的正解）', () => {
+  it('简称补上官方名，并把拼在简称后面的季数带过去', async () => {
+    const { expandQueries, stripSeason } = await import('../src/core/alias.js');
+    const plan = expandQueries('京吹2').queries.map((item) => item.text);
+    expect(plan[0]).toBe('京吹2');
+    expect(plan).toContain('吹响吧！上低音号 2');
+    expect(plan).toContain('吹响吧！上低音号');
+    expect(plan).toContain('Hibike! Euphonium 2');
+    // 季数去掉后应该只剩番剧名
+    expect(stripSeason('吹响吧！上低音号 第二季')).toBe('吹响吧！上低音号');
+  });
+
+  it('按季过滤：搜第二季时把第三季的结果去掉，没写季数的保留', async () => {
+    const { filterBySeason } = await import('../src/core/alias.js');
+    const items = [
+      { title: '[DBD-Raws][吹响吧！上低音号 第一季][01-13TV全集]' },
+      { title: '[UHA-WINGS＆ANK-Raws][吹响吧！上低音号 第二季][01-13]' },
+      { title: '[千夏字幕组&VCB-Studio] 吹响吧！上低音号 3 10-bit 1080p' },
+      { title: 'Hibike! Euphonium S01E25 [CR WEB-DL]' }
+    ];
+    const kept = filterBySeason(items, 2, (item) => item.title).map((item) => item.title);
+    // 第二季那条留下；第三季那条（写了 3）去掉
+    expect(kept.some((t) => t.includes('第二季'))).toBe(true);
+    expect(kept.some((t) => t.includes('上低音号 3'))).toBe(false);
+    // 没写季数的（单集发布）保留 —— 宁可多给几条让用户自己判断
+    expect(kept.some((t) => t.includes('S01E25'))).toBe(true);
+  });
+
+  it('没写季数时不过滤（避免把结果清空）', async () => {
+    const { filterBySeason } = await import('../src/core/alias.js');
+    const items = [{ title: 'A' }, { title: 'B' }];
+    expect(filterBySeason(items, null, (item) => item.title)).toHaveLength(2);
+  });
+});

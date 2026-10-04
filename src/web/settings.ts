@@ -91,6 +91,9 @@ export const SETTINGS_SCHEMA: Record<string, FieldRule> = {
 
   'trackers.animesGarden': { kind: 'boolean' },
   'trackers.mikan': { kind: 'boolean' },
+  'trackers.mikanBase': { kind: 'nullable-string' },
+  'trackers.mikanHosts': { kind: 'string[]' },
+  'trackers.nyaaHosts': { kind: 'string[]' },
   'trackers.nyaa': { kind: 'boolean' },
   'trackers.maxResultsPerTracker': { kind: 'integer', min: 5, max: 500 },
   'trackers.timeoutMs': { kind: 'integer', min: 1000, max: 120_000 },

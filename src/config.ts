@@ -139,8 +139,10 @@ export type TrackerConfig = {
   /** nyaa 站点。.land 被墙时自动回退 .si。 */
   nyaa: boolean;
   nyaaHosts?: string[];
-  /** mikan / nyaa 使用的 RSS 基址与搜索基址。 */
+  /** mikan 的搜索基址。留空则按 mikanHosts 依次尝试（主站常被墙，还有镜像）。 */
   mikanBase?: string;
+  /** mikan 的候选基址列表，按顺序尝试。 */
+  mikanHosts?: string[];
   /** 每次搜索每个源最多取多少条。 */
   maxResultsPerTracker?: number;
   /** 网络超时（毫秒）。 */
@@ -269,7 +271,8 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     mikan: true,
     nyaa: true,
     nyaaHosts: ['https://nyaa.land', 'https://nyaa.si'],
-    mikanBase: 'https://mikanani.me',
+    mikanBase: undefined,
+    mikanHosts: ['https://mikanani.me', 'https://mikanime.tv'],
     maxResultsPerTracker: 60,
     timeoutMs: 15000,
     retries: 2

@@ -19,6 +19,13 @@ export type SearchAndRankOptions = {
   query: string;
   /** 可选的番剧原名，用于生成额外的关键词变体。 */
   altQuery?: string;
+  /**
+   * 额外的关键词（别名扩展、去季数变体等），原样加进搜索。
+   *
+   * 和 altQuery 的区别：altQuery 会被 buildQueries 再加工（拆词、去后缀），
+   * 这里给的是**已经整理好的**关键词，直接用。
+   */
+  extraQueries?: string[];
   config: AppConfig;
   /** 手动搜索不按集号做硬性淘汰；自动化必须严格匹配集号。 */
   mode: SearchMode;
@@ -47,7 +54,12 @@ export type SearchAndRankResult = {
 
 export async function searchAndRank(options: SearchAndRankOptions): Promise<SearchAndRankResult> {
   const startedAt = Date.now();
-  const queries = buildQueries(options.query, options.altQuery ?? options.query);
+  const queries = [
+    ...new Set([
+      ...buildQueries(options.query, options.altQuery ?? options.query),
+      ...(options.extraQueries ?? []).map((item) => item.trim()).filter((item) => item !== '')
+    ])
+  ];
   const search = options.search ?? searchAll;
 
   const errors: Array<{ tracker: string; reason: string }> = [];

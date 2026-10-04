@@ -89,7 +89,43 @@ export async function resolveTorrentMagnet(
   }
 }
 
+/**
+ * mikan 的可用基址，按顺序尝试。
+ *
+ * 为什么要多个：主站 mikanani.me 在国内网络经常连不上（实测那台 Windows
+ * 上 12 秒超时、返回 000，而镜像 mikanime.tv 正常返回 200）。
+ * 只配一个基址的话，一被墙这个源就等于没有，还会白白拖慢每次搜索。
+ */
+export const MIKAN_HOSTS = ['https://mikanani.me', 'https://mikanime.tv'];
+
 export async function searchMikan(
+  keyword: string,
+  options: {
+    maxResults: number;
+    timeoutMs: number;
+    retries: number;
+    base?: string;
+    hosts?: string[];
+    resolveMagnet?: boolean;
+  }
+): Promise<SearchResult[]> {
+  // 显式配了 base 就只用它（用户明确指定）；否则在主站+镜像之间依次尝试
+  const hosts = options.base
+    ? [options.base]
+    : [...new Set([...(options.hosts ?? MIKAN_HOSTS), ...MIKAN_HOSTS])];
+  let lastError: Error | null = null;
+  for (const host of hosts) {
+    try {
+      return await searchMikanOnce(keyword, { ...options, base: host });
+    } catch (error) {
+      lastError = error as Error;
+      log.debug(`mikan 基址 ${host} 不可用：${(error as Error).message}`);
+    }
+  }
+  throw lastError ?? new Error('mikan 没有可用的基址');
+}
+
+async function searchMikanOnce(
   keyword: string,
   options: { maxResults: number; timeoutMs: number; retries: number; base?: string; resolveMagnet?: boolean }
 ): Promise<SearchResult[]> {

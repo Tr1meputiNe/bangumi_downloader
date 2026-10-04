@@ -8,6 +8,7 @@ import { resolveBackend } from '../core/dispatch.js';
 import { JobQueue } from '../core/jobs.js';
 import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
+import { expandQueries, filterBySeason, loadAliases } from '../core/alias.js';
 import {
   loadWatchlist,
   nextEpisodeOf,
@@ -360,23 +361,51 @@ async function handleSearch(deps: WebDeps, url: URL, response: ServerResponse): 
   if (url.searchParams.get('refresh') === '1') searchCache.delete(`manual:${query.toLowerCase()}`);
 
   const limit = Number(url.searchParams.get('limit') ?? '0');
-  const cacheKey = `manual:${query.toLowerCase()}`;
+
+  /*
+   * 关键词扩展：简称 → 官方名，并认出「第几季」。
+   *
+   * 起因：「京吹2」一条都搜不到、「京吹 第一季」搜出来全是第三季 ——
+   * tracker 只做字面匹配，不认识中文圈简称；而且不带季数过滤时，
+   * 新一季会把老季挤到后面（实测搜「吹响吧！上低音号」60 条全是第三季）。
+   */
+  const aliases = loadAliases(deps.configPath ? join(dirname(deps.configPath), 'data', 'aliases.json') : undefined);
+  const expansion = expandQueries(query, aliases);
+  const queries = expansion.queries.map((item) => item.text);
+  const cacheKey = `manual:${queries.join('|').toLowerCase()}`;
 
   const { value: outcome, cached } = await searchCache.getOrLoad(cacheKey, () =>
     searchAndRank({
-      query,
+      query: queries[0] ?? query,
+      // 别名/去季数的变体一起搜，合并结果
+      altQuery: queries[1],
+      extraQueries: queries.slice(2),
       config: deps.config,
       mode: 'manual',
       resolveMikanMagnet: true
     })
   );
 
+  /*
+   * 按季过滤。
+   *
+   * 「标题里写了别的季」的直接丢掉；没写季数的保留（不少第一季发布根本不标季数）。
+   * 过滤后一条不剩时**退回未过滤的结果**并在提示里说明 —— 宁可给用户看到东西
+   * 让他自己判断，也不要因为规则太严交出一片空白。
+   */
+  const all = outcome.ranked;
+  const filtered = expansion.season === null ? all : filterBySeason(all, expansion.season, (item) => item.result.title);
+  const usable = filtered.length > 0 ? filtered : all;
   const max = Number.isFinite(limit) && limit > 0 ? limit : 0;
-  const ranked = max > 0 ? outcome.ranked.slice(0, max) : outcome.ranked;
+  const ranked = max > 0 ? usable.slice(0, max) : usable;
 
   sendJson(response, 200, {
     query,
     queries: outcome.queries,
+    /** 试过的关键词及其来历（界面上展示，别让搜索是个黑盒）。 */
+    queryPlan: expansion.queries,
+    season: expansion.season,
+    seasonFiltered: expansion.season !== null && filtered.length === 0 && all.length > 0,
     results: ranked.map(toDisplayResult),
     errors: outcome.errors,
     elapsedMs: outcome.elapsedMs,

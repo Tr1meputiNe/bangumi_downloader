@@ -89,7 +89,12 @@ export async function searchAll(options: SearchAllOptions): Promise<SearchResult
     if (config.mikan) {
       jobs.push(
         deps
-          .searchMikan(query, { ...base, base: config.mikanBase, resolveMagnet: options.resolveMikanMagnet })
+          .searchMikan(query, {
+            ...base,
+            base: config.mikanBase,
+            hosts: config.mikanHosts,
+            resolveMagnet: options.resolveMikanMagnet
+          })
           .catch(() => [])
       );
     }

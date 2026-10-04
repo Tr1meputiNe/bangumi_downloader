@@ -224,8 +224,19 @@ export function SearchView() {
                 })}
               </div>
             </div>
+            ${data.season
+              ? html`<div class="notice small">
+                  认出你在找
+                  <b>第 ${data.season} 季</b>，已按季过滤（标题里写了别季的排除了，没写季数的保留）
+                  ${data.seasonFiltered ? html` · <span class="warn">过滤后一条不剩，已退回未过滤的结果</span>` : null}
+                </div>`
+              : null}
             <div class="meta dim small">
-              关键词 ${data.queries.join(' / ')} · 去重后 ${data.results.length} 条 ·
+              关键词
+              ${(data.queryPlan ?? data.queries.map((text) => ({ text, origin: '' }))).map(
+                (item) => html`<span class="kw" title=${item.origin ? `来自：${item.origin}` : ''}>${item.text}</span>`
+              )}
+              · 去重后 ${data.results.length} 条 ·
               ${data.cached ? html`<span title="5 分钟内重复搜索会直接用缓存">缓存</span>` : html`${data.elapsedMs}ms`}
               ${data.errors.length > 0 &&
               html`<span
@@ -242,7 +253,34 @@ export function SearchView() {
             html`<${Empty}
               text="当前筛选下没有结果"
               hint=${onlyPreferred ? '取消「只看符合偏好」试试' : undefined}
-            />`}
+            />
+            ${data.results.length === 0 &&
+            html`
+              <div class="empty-hints">
+                <div class="dim small">
+                  一条都没搜到。tracker 只做字面匹配，中文简称（比如「京吹」）基本搜不到东西，
+                  而且同一部番的中文名/日文名/罗马音命中率差别很大。试试这些：
+                </div>
+                <div class="hint-chips">
+                  ${(data.queryPlan ?? [])
+                    .filter((item) => item.text !== data.query)
+                    .map(
+                      (item) => html`<button type="button" class="chip" onClick=${() => {
+                        setQuery(item.text);
+                        void runSearch(item.text);
+                      }}>
+                        ${item.text}
+                      </button>`
+                    )}
+                  ${suggestionsFor(data.query).map(
+                    (text) => html`<button type="button" class="chip" onClick=${() => {
+                      setQuery(text);
+                      void runSearch(text);
+                    }}>${text}</button>`
+                  )}
+                </div>
+              </div>
+            `}`}
             ${visible.map(
               (item) => html`
                 <${ResultRow} key=${item.key} item=${item} checked=${selected.has(item.key)} onToggle=${() => toggle(item.key)} />
@@ -325,4 +363,18 @@ function ResultRow({ item, checked, onToggle }: { item: ResultItem; checked: boo
       </div>
     </label>
   `;
+}
+
+/**
+ * 搜不到时的建议关键词。
+ *
+ * 只做很轻的启发：中文简称（2~6 个字、没有空格和括号）大概率在 tracker 里搜不到，
+ * 提醒用户换成官方全名或罗马音。不做自动翻译 —— 猜错了更浪费时间。
+ */
+function suggestionsFor(query: string): string[] {
+  const trimmed = query.trim();
+  if (trimmed === '') return [];
+  const looksLikeNickname = trimmed.length <= 6 && !/[\s（）()[\]]/.test(trimmed) && /[\u4e00-\u9fff]/.test(trimmed);
+  if (!looksLikeNickname) return [];
+  return [`${trimmed} 第一季`, `${trimmed} 第二季`];
 }

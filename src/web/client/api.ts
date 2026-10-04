@@ -39,6 +39,12 @@ export type ResultItem = {
 export type SearchResponse = {
   query: string;
   queries: string[];
+  /** 试过的关键词及来历（原样/别名/去季数…）。 */
+  queryPlan?: Array<{ text: string; origin: string }>;
+  /** 从查询里认出来的季数。 */
+  season?: number | null;
+  /** 因为按季过滤后一条不剩、已退回未过滤结果。 */
+  seasonFiltered?: boolean;
   results: ResultItem[];
   errors: Array<{ tracker: string; reason: string }>;
   elapsedMs: number;
