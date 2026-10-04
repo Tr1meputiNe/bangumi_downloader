@@ -18,7 +18,18 @@ const log = logger('jobs');
  * 现在改成：请求进来立刻入队并返回任务号，前端轮询 /api/jobs 看进度。
  */
 
-export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type JobStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+
+/** 用户能对任务做的操作。 */
+export type JobAction = 'pause' | 'resume' | 'cancel';
+
+export type ActionResult = {
+  ok: boolean;
+  /** 操作后任务的状态。 */
+  status?: JobStatus;
+  /** 不能操作时说明原因，前端可直接提示。 */
+  reason?: string;
+};
 
 export type DownloadJob = {
   id: string;
@@ -48,6 +59,13 @@ export type DownloadJob = {
   error: string | null;
   /** 这条任务由哪个后端处理。 */
   backend: string;
+  /**
+   * 上次为什么停下（暂停/取消）。
+   *
+   * 需要它是因为「用户主动暂停」和「下载器自己超时」都会走到同一个 catch，
+   * 不记下来就会把暂停显示成失败。
+   */
+  lastStop?: 'paused' | 'cancelled' | null;
 };
 
 export type EnqueueInput = {
@@ -74,6 +92,10 @@ export class JobQueue extends EventEmitter {
   #running = false;
   #deps: JobDeps;
   #counter = 0;
+  /** 每个运行中任务一个控制器：暂停/取消就是 abort 它。 */
+  #controllers = new Map<string, AbortController>();
+  /** 每个任务的下载进度，暂停续传时用来判断「有没有真的接着下」。 */
+  #progress = new Map<string, number>();
 
   constructor(deps: JobDeps) {
     super();
@@ -122,22 +144,78 @@ export class JobQueue extends EventEmitter {
     return this.#jobs.get(id);
   }
 
-  /** 取消：排队中的直接标掉；正在跑的只能标状态（下载器没有对外暴露取消）。 */
-  cancel(id: string): boolean {
+  /**
+   * 暂停 / 继续 / 取消。
+   *
+   * 三个操作都作用在同一个 AbortController 上：
+   *   - pause：abort 掉当前这次下载（引擎会关连接、保留已校验的分片），并记住「是用户暂停的」
+   *   - resume：重新入队；引擎启动时会 resumeScan，跳过已下好的分片接着下
+   *   - cancel：abort 并标记结束，不再重排
+   * 因为 abort 和「超时」在引擎里走的是同一条路，所以必须显式记下 lastStop，
+   * 否则用户暂停会被显示成下载失败。
+   */
+  act(id: string, action: JobAction): ActionResult {
     const job = this.#jobs.get(id);
-    if (!job) return false;
-    if (job.status === 'queued') {
-      job.status = 'cancelled';
-      job.finishedAt = new Date().toISOString();
-      job.messages.push('已取消（还没开始下载）');
-      this.#pending = this.#pending.filter((item) => item !== id);
-      return true;
+    if (!job) return { ok: false, reason: '任务不存在' };
+
+    if (action === 'pause') {
+      if (job.status === 'paused') return { ok: false, reason: '已经是暂停状态' };
+      if (job.status === 'queued') {
+        this.#pending = this.#pending.filter((item) => item !== id);
+        job.lastStop = 'paused';
+        this.#setStatus(job, 'paused');
+        this.#note(job, '已暂停（还没开始下载）');
+        return { ok: true, status: 'paused' };
+      }
+      if (job.status !== 'running') return { ok: false, reason: '任务已经结束了' };
+
+      job.lastStop = 'paused';
+      /*
+       * 立刻置为 paused，不等引擎真的退出。
+       *
+       * 引擎可能在「获取元数据」这种阶段要等几十秒到两分钟才响应 abort，
+       * 如果状态等它，用户点了暂停会看到按钮没反应、状态还是「下载中」。
+       * 后台的 #run 收尾时会看到 lastStop === 'paused'，不会覆盖成失败。
+       */
+      this.#setStatus(job, 'paused');
+      this.#note(job, '已暂停（已下好的分片会保留，点继续接着下）');
+      this.#controllers.get(id)?.abort();
+      return { ok: true, status: 'paused' };
     }
-    if (job.status === 'running') {
-      job.messages.push('已请求取消（等当前候选结束）');
-      return true;
+
+    if (action === 'resume') {
+      if (job.status !== 'paused') return { ok: false, reason: '只有暂停中的任务可以继续' };
+      job.lastStop = null;
+      job.error = null;
+      this.#note(job, '已继续，正在从已有进度接着下…');
+      this.#setStatus(job, 'queued');
+      this.#pending.push(id);
+      void this.#drain();
+      return { ok: true, status: 'queued' };
     }
-    return false;
+
+    // cancel
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+      return { ok: false, reason: '任务已经结束了' };
+    }
+    this.#pending = this.#pending.filter((item) => item !== id);
+    job.lastStop = 'cancelled';
+    // 同上：状态立刻生效，后台收尾时不会把它改成 failed
+    this.#setStatus(job, 'cancelled');
+    this.#note(job, '已取消');
+    job.finishedAt = new Date().toISOString();
+    this.#controllers.get(id)?.abort();
+    return { ok: true, status: 'cancelled' };
+  }
+
+  /** 兼容旧调用点。 */
+  cancel(id: string): boolean {
+    return this.act(id, 'cancel').ok;
+  }
+
+  #setStatus(job: DownloadJob, status: JobStatus): void {
+    job.status = status;
+    this.emit('update', job);
   }
 
   get running(): boolean {
@@ -168,16 +246,22 @@ export class JobQueue extends EventEmitter {
   }
 
   async #run(job: DownloadJob): Promise<void> {
-    job.status = 'running';
-    job.startedAt = new Date().toISOString();
+    this.#setStatus(job, 'running');
+    if (!job.startedAt) job.startedAt = new Date().toISOString();
     this.#note(job, `开始下载：${job.title.slice(0, 70)}`);
 
+    const controller = new AbortController();
+    this.#controllers.set(job.id, controller);
+    // 续传时要能分辨「这次真的又下到了东西」还是「一上来就被暂停/取消」
+    const bytesAtStart = job.downloadedBytes;
+
     try {
-      const hooks = jobHooks(job);
+      const hooks = jobHooks(job, (bytes) => this.#progress.set(job.id, bytes));
       const result = await dispatchDownload(
         {
           config: this.#deps.config,
           qbittorrent: this.#deps.qbittorrent,
+          signal: controller.signal,
           onLog: hooks.onLog,
           onProgress: hooks.onProgress
         },
@@ -190,7 +274,7 @@ export class JobQueue extends EventEmitter {
         }
       );
 
-      job.status = 'completed';
+      this.#setStatus(job, 'completed');
       job.files = result.files ?? [];
       job.ratio = 1;
       this.#note(
@@ -198,12 +282,27 @@ export class JobQueue extends EventEmitter {
         `完成：${job.files.length} 个文件` + (result.fileCount !== null ? `（${result.fileCount}）` : '')
       );
     } catch (error) {
-      job.status = 'failed';
-      job.error = error instanceof Error ? error.message : String(error);
-      this.#note(job, `失败：${job.error}`);
-      log.warn(`任务 ${job.id} 失败：${job.error}`);
+      const message = error instanceof Error ? error.message : String(error);
+      const gained = Math.max(0, job.downloadedBytes - bytesAtStart);
+
+      if (job.lastStop === 'paused') {
+        this.#setStatus(job, 'paused');
+        this.#note(job, '已暂停，点继续会从这里接着下');
+      } else if (job.lastStop === 'cancelled') {
+        this.#setStatus(job, 'cancelled');
+      } else {
+        this.#setStatus(job, 'failed');
+        job.error = message;
+        this.#note(job, `失败：${message}`);
+        log.warn(`任务 ${job.id} 失败：${message}`);
+      }
+      if (gained > 0) this.#note(job, `本轮新增 ${(gained / 1048576).toFixed(1)} MB（会保留）`);
     } finally {
-      job.finishedAt = new Date().toISOString();
+      this.#controllers.delete(job.id);
+      this.#progress.delete(job.id);
+      if (job.status !== 'paused' && job.status !== 'queued') {
+        job.finishedAt = new Date().toISOString();
+      }
       this.#trimFinished();
     }
   }
@@ -217,7 +316,7 @@ export class JobQueue extends EventEmitter {
   /** 只保留最近若干个已结束的任务，避免长时间运行后内存里堆一堆。 */
   #trimFinished(): void {
     const finished = [...this.#jobs.values()]
-      .filter((job) => job.status !== 'queued' && job.status !== 'running')
+      .filter((job) => job.status !== 'queued' && job.status !== 'running' && job.status !== 'paused')
       .sort((a, b) => {
         const left = a.finishedAt ?? a.createdAt;
         const right = b.finishedAt ?? b.createdAt;
@@ -232,7 +331,10 @@ export class JobQueue extends EventEmitter {
 }
 
 /** 给任务挂上下载器回调用的辅助（把引擎的 onProgress/onLog 接到任务上）。 */
-export function jobHooks(job: DownloadJob): {
+export function jobHooks(
+  job: DownloadJob,
+  onBytes?: (downloadedBytes: number) => void
+): {
   onLog: (message: string) => void;
   onProgress: (progress: { ratio: number; downloadedBytes: number; totalBytes: number; speed: number; peers: number }) => void;
 } {
@@ -245,6 +347,7 @@ export function jobHooks(job: DownloadJob): {
     onProgress: (progress) => {
       job.ratio = progress.ratio;
       job.downloadedBytes = progress.downloadedBytes;
+      onBytes?.(progress.downloadedBytes);
       job.totalBytes = progress.totalBytes;
       job.speed = progress.speed;
       job.peers = progress.peers;

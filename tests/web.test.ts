@@ -328,3 +328,119 @@ describe('下载任务队列（/api/add 不再阻塞等待）', () => {
     }
   });
 });
+
+describe('任务操作：暂停 / 继续 / 取消', () => {
+  let started: StartedServer;
+  let queue: JobQueue;
+  let config: ReturnType<typeof defaultConfig>;
+
+  beforeAll(async () => {
+    config = defaultConfig();
+    config.web = { ...config.web, port: 0, host: '127.0.0.1', openBrowser: false };
+    config.download = { ...config.download, backend: 'builtin', savePath: '/tmp/dsh-jobs-test' };
+    queue = new JobQueue({ config });
+    started = await startWebServer({ config, qbittorrent: undefined, jobs: queue });
+  });
+
+  afterAll(async () => {
+    await started?.close();
+  });
+
+  const act = async (id: string, action: string) =>
+    fetch(`${started.url}api/jobs/act`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, action })
+    });
+
+  const enqueue = async (): Promise<string> => {
+    const response = await fetch(`${started.url}api/add`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        items: [{ title: `暂停测试 ${Date.now()}`, magnet: `magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=x` }]
+      })
+    });
+    const body = (await response.json()) as { results: Array<{ jobId?: string }> };
+    return body.results[0]?.jobId as string;
+  };
+
+  it('暂停一个运行中的任务，状态变成 paused 而不是 failed', async () => {
+    const id = await enqueue();
+    await act(id, 'pause');
+
+    // 等 abort 生效（引擎要么很快抛，要么在下一个检查点退出）
+    let job = queue.get(id);
+    for (let i = 0; i < 40 && job?.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      job = queue.get(id);
+    }
+
+    expect(job?.status).toBe('paused');
+    // 关键：不能显示成失败 —— 用户主动暂停和引擎超时走的是同一条代码路径
+    expect(job?.error).toBeNull();
+    await act(id, 'cancel');
+  });
+
+  it('继续一个暂停的任务：重新排队并且不再带着错误信息', async () => {
+    const id = await enqueue();
+    await act(id, 'pause');
+    let job = queue.get(id);
+    for (let i = 0; i < 40 && job?.status === 'running'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      job = queue.get(id);
+    }
+    expect(job?.status).toBe('paused');
+
+    const response = await act(id, 'resume');
+    expect(response.status).toBe(200);
+    expect(queue.get(id)?.status === 'queued' || queue.get(id)?.status === 'running').toBe(true);
+    expect(queue.get(id)?.error).toBeNull();
+
+    await act(id, 'cancel');
+  });
+
+  it('取消后的任务不会再跑', async () => {
+    const id = await enqueue();
+    await act(id, 'cancel');
+    let job = queue.get(id);
+    for (let i = 0; i < 30 && (job?.status === 'running' || job?.status === 'queued'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      job = queue.get(id);
+    }
+    expect(['cancelled', 'paused']).toContain(job?.status);
+    // 取消之后不应该再变成 completed/failed
+    expect(job?.status).toBe('cancelled');
+  });
+
+  it('对已结束的任务操作会被拒绝（409），而不是静默成功', async () => {
+    const id = await enqueue();
+    await act(id, 'cancel');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const response = await act(id, 'resume');
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error?: string };
+    expect(typeof body.error).toBe('string');
+  });
+
+  it('非法 action 返回 400', async () => {
+    const id = await enqueue();
+    const response = await act(id, 'explode');
+    expect(response.status).toBe(400);
+    await act(id, 'cancel');
+  });
+
+  it('/api/jobs 带上 canPause / canResume / canCancel，前端据此显示图标按钮', async () => {
+    const id = await enqueue();
+    const body = (await (await fetch(`${started.url}api/jobs`)).json()) as {
+      jobs: Array<{ id: string; canPause: boolean; canResume: boolean; canCancel: boolean }>;
+    };
+    const job = body.jobs.find((item) => item.id === id);
+    expect(job).toBeDefined();
+    expect(typeof job?.canPause).toBe('boolean');
+    expect(typeof job?.canResume).toBe('boolean');
+    expect(typeof job?.canCancel).toBe('boolean');
+    await act(id, 'cancel');
+  });
+});

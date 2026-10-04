@@ -9,6 +9,9 @@ import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { html } from './html.js';
 import { api, type AddResponse, type JobView, type ResultItem, type SearchResponse, type StatusResponse } from './api.js';
+
+/** 任务操作。与后端 /api/jobs/act 的 action 对应。 */
+type JobAction = 'pause' | 'resume' | 'cancel';
 import { formatSize, relativeTime, shortTracker } from './format.js';
 
 const QUALITY_LABELS: Record<string, string> = {
@@ -137,6 +140,21 @@ function App() {
   const totalSize = useMemo(
     () => selectedItems.reduce((sum, item) => sum + (item.sizeBytes ?? 0), 0),
     [selectedItems]
+  );
+
+  const onJobAction = useCallback(
+    async (job: JobView, action: JobAction) => {
+      try {
+        await api.jobAction(job.id, action);
+        // 立刻刷新一次，别等下一个轮询周期，否则点了没反应
+        const response = await api.jobs();
+        setJobs(response.jobs);
+        setJobsRunning(response.running);
+      } catch (err) {
+        setToast({ kind: 'err', text: err instanceof Error ? err.message : String(err) });
+      }
+    },
+    []
   );
 
   const addSelected = useCallback(async () => {
@@ -287,7 +305,7 @@ function App() {
             下载任务
             <span class="dim">${jobsRunning ? '进行中' : '空闲'}</span>
           </div>
-          ${jobs.slice(0, 8).map((job) => html`<${JobRow} key=${job.id} job=${job} />`)}
+          ${jobs.slice(0, 8).map((job) => html`<${JobRow} key=${job.id} job=${job} onAction=${onJobAction} />`)}
         </div>
       `}
 
@@ -299,6 +317,7 @@ function App() {
 const JOB_LABELS: Record<JobView['status'], string> = {
   queued: '排队中',
   running: '下载中',
+  paused: '已暂停',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消'
@@ -310,7 +329,7 @@ const JOB_LABELS: Record<JobView['status'], string> = {
  * 存在的意义：下载在后台队列里跑（可能几十分钟），
  * 没有这个面板用户就只能干等，不知道是卡住了还是在正常进行。
  */
-function JobRow({ job }: { job: JobView }) {
+function JobRow({ job, onAction }: { job: JobView; onAction: (job: JobView, action: JobAction) => void }) {
   const percent = job.percent ?? 0;
   const detail: string[] = [];
   if (job.downloadedBytes > 0) {
@@ -331,6 +350,32 @@ function JobRow({ job }: { job: JobView }) {
         ${job.percent !== null &&
         job.status === 'running' &&
         html`<span class="job-percent">${percent.toFixed(1)}%</span>`}
+        <span class="job-actions">
+          ${job.canPause &&
+          html`<button
+            type="button"
+            class="icon"
+            title="暂停（已下好的分片会保留）"
+            aria-label="暂停"
+            onClick=${() => onAction(job, 'pause')}
+          >⏸</button>`}
+          ${job.canResume &&
+          html`<button
+            type="button"
+            class="icon"
+            title="继续（从已有进度接着下）"
+            aria-label="继续"
+            onClick=${() => onAction(job, 'resume')}
+          >▶</button>`}
+          ${job.canCancel &&
+          html`<button
+            type="button"
+            class="icon danger"
+            title="取消任务"
+            aria-label="取消"
+            onClick=${() => onAction(job, 'cancel')}
+          >✕</button>`}
+        </span>
       </div>
       ${job.status === 'running' &&
       html`

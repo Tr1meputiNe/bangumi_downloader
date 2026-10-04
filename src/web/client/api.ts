@@ -55,7 +55,7 @@ export type AddResponse = {
 export type JobView = {
   id: string;
   title: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -69,6 +69,10 @@ export type JobView = {
   files: string[];
   error: string | null;
   backend: string;
+  /** 服务端算好的「这个状态下能做哪些操作」。 */
+  canPause: boolean;
+  canResume: boolean;
+  canCancel: boolean;
 };
 
 export type JobsResponse = {
@@ -115,6 +119,9 @@ export const api = {
   add: (items: unknown[]) =>
     request<AddResponse>('/api/add', { method: 'POST', body: JSON.stringify({ items }) }),
   jobs: () => request<JobsResponse>('/api/jobs'),
-  cancelJob: (id: string) =>
-    request<{ ok: boolean }>('/api/jobs/cancel', { method: 'POST', body: JSON.stringify({ id }) })
+  jobAction: (id: string, action: 'pause' | 'resume' | 'cancel') =>
+    request<{ ok: boolean; status?: string }>('/api/jobs/act', {
+      method: 'POST',
+      body: JSON.stringify({ id, action })
+    })
 };

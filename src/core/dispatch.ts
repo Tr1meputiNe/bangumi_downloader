@@ -51,6 +51,11 @@ export type DispatchDeps = {
     speed: number;
     peers: number;
   }) => void;
+  /**
+   * 取消信号。Web 界面的「暂停/取消」靠它真正停住下载
+   * （引擎会关掉连接，但已经校验通过的分片留在磁盘上，继续时接着下）。
+   */
+  signal?: AbortSignal;
 };
 
 export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Promise<DispatchResult> {
@@ -60,7 +65,11 @@ export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Pr
     const result = await pushRelease(deps.qbittorrent, deps.config, input);
     return { ...result, backend };
   }
-  return await downloadWithBuiltin(deps.config, input, { onLog: deps.onLog, onProgress: deps.onProgress });
+  return await downloadWithBuiltin(deps.config, input, {
+    onLog: deps.onLog,
+    onProgress: deps.onProgress,
+    signal: deps.signal
+  });
 }
 
 /**
@@ -73,7 +82,11 @@ export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Pr
 export async function downloadWithBuiltin(
   config: AppConfig,
   input: PushInput,
-  hooks: { onLog?: (message: string) => void; onProgress?: DispatchDeps['onProgress'] } = {}
+  hooks: {
+    onLog?: (message: string) => void;
+    onProgress?: DispatchDeps['onProgress'];
+    signal?: AbortSignal;
+  } = {}
 ): Promise<DispatchResult> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
@@ -114,6 +127,7 @@ export async function downloadWithBuiltin(
     selectedFiles,
     timeoutMs: config.download.timeoutMs ?? 60 * 60_000,
     stallTimeoutMs: config.download.stallTimeoutMs ?? 180_000,
+    signal: hooks.signal,
     onLog: (message) => {
       log.info(message);
       hooks.onLog?.(message);

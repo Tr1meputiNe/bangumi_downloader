@@ -71,8 +71,8 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
     const jobs = ensureJobs(deps).list();
     return sendJson(response, 200, { jobs: jobs.map(toJobView), running: ensureJobs(deps).running });
   }
-  if (request.method === 'POST' && path === '/api/jobs/cancel') {
-    return handleCancelJob(deps, request, response);
+  if (request.method === 'POST' && path === '/api/jobs/act') {
+    return handleJobAction(deps, request, response);
   }
   if (request.method === 'GET' && path === '/healthz') {
     return sendJson(response, 200, { ok: true });
@@ -205,18 +205,30 @@ async function handleAdd(deps: WebDeps, request: IncomingMessage, response: Serv
   sendJson(response, 200, { results, queued: results.filter((item) => item.ok).length });
 }
 
-async function handleCancelJob(deps: WebDeps, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  let body: { id?: unknown };
+/**
+ * 对任务执行 pause / resume / cancel。
+ *
+ * 暂停是真的停下载（abort 掉引擎），不是只改状态 ——
+ * 已校验通过的分片会留在磁盘上，继续时引擎会跳过它们接着下。
+ */
+async function handleJobAction(deps: WebDeps, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  let body: { id?: unknown; action?: unknown };
   try {
-    body = JSON.parse(await readBody(request)) as { id?: unknown };
+    body = JSON.parse(await readBody(request)) as { id?: unknown; action?: unknown };
   } catch {
     return sendJson(response, 400, { error: '请求体不是合法 JSON' });
   }
-  const id = typeof body.id === 'string' ? body.id : '';
-  if (id === '') return sendJson(response, 400, { error: '缺少任务号 id' });
 
-  const ok = ensureJobs(deps).cancel(id);
-  sendJson(response, ok ? 200 : 404, ok ? { ok: true } : { error: '任务不存在或已经结束' });
+  const id = typeof body.id === 'string' ? body.id : '';
+  const action = typeof body.action === 'string' ? body.action : '';
+  if (id === '') return sendJson(response, 400, { error: '缺少任务号 id' });
+  if (action !== 'pause' && action !== 'resume' && action !== 'cancel') {
+    return sendJson(response, 400, { error: 'action 只能是 pause / resume / cancel' });
+  }
+
+  const result = ensureJobs(deps).act(id, action);
+  if (!result.ok) return sendJson(response, 409, { error: result.reason ?? '操作失败' });
+  sendJson(response, 200, { ok: true, status: result.status });
 }
 
 /** 任务的对外视图（去掉内部字段，进度换算成百分比）。 */
@@ -236,7 +248,11 @@ function toJobView(job: ReturnType<JobQueue['list']>[number]) {
     messages: job.messages.slice(-8),
     files: job.files,
     error: job.error,
-    backend: job.backend
+    backend: job.backend,
+    // 前端据此决定显示哪些按钮，省得它自己推状态机
+    canPause: job.status === 'running' || job.status === 'queued',
+    canResume: job.status === 'paused',
+    canCancel: job.status === 'running' || job.status === 'queued' || job.status === 'paused'
   };
 }
 
