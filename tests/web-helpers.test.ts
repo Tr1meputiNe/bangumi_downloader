@@ -306,3 +306,58 @@ describe('跨进程去重：同一个种子不许被两个进程同时下', () =
     expect(downloadKeyOf({ title: '没有磁力' })).toBe('t:没有磁力');
   });
 });
+
+describe('从 Planner 同步本地清单（只补缺，不动已有的）', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const makeList = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'sync-'));
+    dirs.push(dir);
+    return join(dir, 'watchlist.json');
+  };
+
+  it('补进缺的番，startFrom 取「已看 + 1」', async () => {
+    const { syncFromPlanner, loadWatchlist, saveWatchlist } = await import('../src/core/watchlist.js');
+    const path = makeList();
+    saveWatchlist(path, { version: 1, entries: [{ query: '吹响上低音号 第三季', lastEpisode: 13 }] });
+
+    const result = syncFromPlanner(path, [
+      { name: '吹响上低音号 第三季', eps: 13, epStatus: 13, unwatched: 0 },
+      { name: '相反的你和我 第二季', eps: 13, epStatus: 12, unwatched: 1 },
+      { name: '魔女', eps: 12, epStatus: 0, unwatched: 12 }
+    ]);
+
+    expect(result.added).toEqual(['相反的你和我 第二季', '魔女']);
+    const list = loadWatchlist(path);
+    expect(list.entries).toHaveLength(3);
+    // 已有的那条不动（进度还是 13，没被 epStatus 覆盖）
+    expect(list.entries[0]?.lastEpisode).toBe(13);
+    // 新补的两条从「已看 + 1」开始，和 Planner 追的集数一致
+    expect(list.entries[1]?.startFrom).toBe(13);
+    expect(list.entries[2]?.startFrom).toBe(1);
+    expect(list.entries[2]?.note).toContain('Watch Planner');
+  });
+
+  it('已有条目完全不动（用户的进度、备注、禁用状态优先）', async () => {
+    const { syncFromPlanner, loadWatchlist, saveWatchlist } = await import('../src/core/watchlist.js');
+    const path = makeList();
+    saveWatchlist(path, { version: 1, entries: [{ query: '魔女', startFrom: 5, note: '我自己改的', enabled: false }] });
+
+    const result = syncFromPlanner(path, [{ name: '魔女', eps: 12, epStatus: 3, unwatched: 9 }]);
+    expect(result.added).toEqual([]);
+    const entry = loadWatchlist(path).entries[0];
+    expect(entry?.startFrom).toBe(5);
+    expect(entry?.note).toBe('我自己改的');
+    expect(entry?.enabled).toBe(false);
+  });
+
+  it('总集数未知时备注也说得清楚', async () => {
+    const { syncFromPlanner, loadWatchlist } = await import('../src/core/watchlist.js');
+    const path = makeList();
+    syncFromPlanner(path, [{ name: '新番', eps: 0, epStatus: 0, unwatched: 0 }]);
+    expect(loadWatchlist(path).entries[0]?.note).toContain('总集数未知');
+  });
+});

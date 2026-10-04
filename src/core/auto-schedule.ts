@@ -584,6 +584,14 @@ export type PlanRow = {
   subjectId: number;
   name: string;
   episode: number | null;
+  /** 总集数（Planner 的 eps）。 */
+  totalEpisodes: number;
+  /** 已看集数（Planner 的 epStatus）。 */
+  watchedEpisodes: number;
+  /** 未看集数（Planner 的 unwatchedMainEpisodeCount，含还没播的）。 */
+  unwatchedEpisodes: number;
+  /** 总集数是否已经确定（连载中的番往往还不知道）。 */
+  totalEpisodesKnown: boolean;
   /** Planner 给的原始播出日期与时刻。 */
   airdate: string;
   airTime: string | null;
@@ -613,7 +621,7 @@ const STATUS_TEXT: Record<PlanRowStatus, string> = {
  * 一眼从上往下看就是了。
  */
 export function buildPlanRows(
-  subjects: readonly SubjectNext[],
+  subjects: readonly (SubjectNext & { eps?: number; epStatus?: number; unwatched?: number; totalEpisodesKnown?: boolean })[],
   now: Date,
   options: { readyDelayMinutes: number; releaseWindowHours: number },
   done: ReadonlySet<string> = new Set()
@@ -628,7 +636,11 @@ export function buildPlanRows(
       name: subject.name,
       episode: next?.ep ?? null,
       airdate: next?.airdate ?? '',
-      airTime: next?.airTime ?? null
+      airTime: next?.airTime ?? null,
+      totalEpisodes: subject.eps ?? 0,
+      watchedEpisodes: subject.epStatus ?? 0,
+      unwatchedEpisodes: subject.unwatched ?? 0,
+      totalEpisodesKnown: subject.totalEpisodesKnown !== false
     };
 
     if (!next) return { ...base, broadcastAt: null, readyAt: null, until: null, status: 'unknown' as const, statusText: STATUS_TEXT.unknown };

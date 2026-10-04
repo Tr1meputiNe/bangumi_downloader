@@ -8,7 +8,15 @@ import { resolveBackend } from '../core/dispatch.js';
 import { JobQueue } from '../core/jobs.js';
 import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
-import { loadWatchlist, nextEpisodeOf, removeWatchEntry, upsertWatchEntry, watchlistPath, type WatchEntry } from '../core/watchlist.js';
+import {
+  loadWatchlist,
+  nextEpisodeOf,
+  removeWatchEntry,
+  syncFromPlanner,
+  upsertWatchEntry,
+  watchlistPath,
+  type WatchEntry
+} from '../core/watchlist.js';
 import { buildTaskSchedule, syncTaskSchedule } from '../core/task-schedule.js';
 import {
   autoSchedulePath,
@@ -149,6 +157,8 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
   /* ---------------- 追番计划 ---------------- */
   if (method === 'GET' && path === '/api/watchlist') return sendJson(response, 200, await buildWatchlist(deps));
   if (method === 'POST' && path === '/api/watchlist') return handleWatchlistEdit(deps, request, response);
+  if (method === 'POST' && path === '/api/watchlist/sync') return handleWatchlistSync(deps, response);
+  if (method === 'GET' && path === '/api/planner/subject') return handlePlannerSubject(deps, url, response);
 
   /* ---------------- 设置与日志 ---------------- */
   if (method === 'GET' && path === '/api/config') {
@@ -704,6 +714,8 @@ export type PlannerSubjectView = {
   unwatched: number;
   totalEpisodes: number;
   watchedEpisodes: number;
+  /** 总集数是否已经确定（连载中的新番常常还不知道一共几集）。 */
+  totalEpisodesKnown: boolean;
   airDate: string | null;
   url: string | null;
   image: string | null;
@@ -787,6 +799,7 @@ function toPlannerSubjectView(subject: PlannerSubject): PlannerSubjectView {
     unwatched: subject.unwatchedMainEpisodeCount ?? 0,
     totalEpisodes: subject.eps ?? 0,
     watchedEpisodes: subject.epStatus ?? 0,
+    totalEpisodesKnown: subject.totalEpisodesKnown !== false,
     airDate: subject.airDate ?? null,
     url: subject.url ?? null,
     image: subject.image ?? null,
@@ -838,6 +851,10 @@ async function buildWatchlist(deps: WebDeps) {
         planner.subjects.map((subject) => ({
           subjectId: subject.id,
           name: subject.display,
+          eps: subject.totalEpisodes,
+          epStatus: subject.watchedEpisodes,
+          unwatched: subject.unwatched,
+          totalEpisodesKnown: subject.totalEpisodesKnown,
           next: subject.nextEpisode
             ? { ep: subject.nextEpisode.ep, airdate: subject.nextEpisode.airdate, airTime: subject.nextEpisode.airTime ?? null }
             : null
@@ -876,6 +893,70 @@ async function buildWatchlist(deps: WebDeps) {
       maxEpisodesPerSubjectPerRun: deps.config.download.maxEpisodesPerSubjectPerRun ?? 999
     }
   };
+}
+
+/**
+ * 把 Planner 里「在看」的番补进本地清单（只补缺，不动已有的条目）。
+ *
+ * 本地清单是 Planner 连不上时的兜底数据源 —— 不同步的话，
+ * Planner 一挂就只剩清单里手工填的那几条在追。
+ */
+async function handleWatchlistSync(deps: WebDeps, response: ServerResponse): Promise<void> {
+  if (!deps.configPath) return sendJson(response, 400, { error: '服务启动时没有指定 config.json，无法定位追番清单' });
+
+  const planner = await probePlanner(deps, { force: true });
+  if (!planner.ok) {
+    return sendJson(response, 409, { error: `连不上 Watch Planner（${planner.message}），先确认它在运行` });
+  }
+
+  const synced = syncFromPlanner(
+    watchlistPath(deps.configPath),
+    planner.subjects.map((subject) => ({
+      name: subject.display,
+      eps: subject.totalEpisodes,
+      epStatus: subject.watchedEpisodes,
+      unwatched: subject.unwatched
+    }))
+  );
+
+  if (synced.added.length > 0) log.info(`从 Planner 补进清单 ${synced.added.length} 部：${synced.added.join('、')}`);
+  sendJson(response, 200, { added: synced.added, ...(await buildWatchlist(deps)) });
+}
+
+/** 某部番的逐集状态（计划页展开时按需取，不用每次轮询都拉）。 */
+async function handlePlannerSubject(deps: WebDeps, url: URL, response: ServerResponse): Promise<void> {
+  const id = Number(url.searchParams.get('id') ?? '0');
+  if (!Number.isFinite(id) || id <= 0) return sendJson(response, 400, { error: '缺少参数 id' });
+
+  const client = new PlannerClient({
+    baseUrl: deps.config.plannerBaseUrl,
+    timeoutMs: Math.min(deps.config.trackers.timeoutMs ?? 15_000, 8000),
+    retries: 0
+  });
+
+  try {
+    const episodes = await client.subjectEpisodes(id);
+    const today = new Date().toISOString().slice(0, 10);
+    sendJson(response, 200, {
+      subjectId: id,
+      episodes: episodes
+        .filter((episode) => episode.episodeType === 0)
+        .map((episode) => ({
+          ep: episode.ep,
+          sort: episode.sort,
+          title: episode.nameCn || episode.name,
+          airdate: episode.airdate,
+          airTime: episode.airTime ?? null,
+          watched: episode.collectionType === 2,
+          aired: (episode.airdate ?? '').slice(0, 10) <= today,
+          dismissed: Boolean(episode.dismissedAt),
+          snoozedUntil: episode.snoozedUntil ?? null
+        }))
+        .sort((a, b) => a.sort - b.sort)
+    });
+  } catch (error) {
+    sendJson(response, 502, { error: `读取分集失败：${(error as Error).message.split('\n')[0]}` });
+  }
 }
 
 type WatchlistBody = {

@@ -5,6 +5,7 @@ import { downloadUntilComplete } from './retry.js';
 import {
   loadWatchlist,
   markEpisodesCompleted,
+  syncFromPlanner,
   saveWatchlist,
   watchlistPath,
   WATCHLIST_FILENAME,
@@ -346,6 +347,35 @@ async function runFromPlanner(
     lookbackDays: config.download.lookbackDays ?? null,
     readyDelayMinutes: config.download.readyDelayMinutes ?? null
   });
+
+  /*
+   * 顺手把「在看」的番同步进本地清单。
+   *
+   * 本地清单是 Planner 挂掉时的兜底数据源；不同步的话，Planner 一不可用
+   * 就只剩清单里那几条在追（实测差 7 部）。只补缺，不动已有的条目。
+   */
+  if (options.configPath) {
+    try {
+      const dashboard = await planner.dashboard();
+      const wantedTypes = new Set(config.collectionTypes);
+      const synced = syncFromPlanner(
+        options.watchlistFile ?? watchlistPath(options.configPath),
+        dashboard.subjects
+          .filter((subject) => wantedTypes.has(subject.collectionType))
+          .map((subject) => ({
+            name: displayName(subject),
+            eps: subject.eps ?? 0,
+            epStatus: subject.epStatus ?? 0,
+            unwatched: subject.unwatchedMainEpisodeCount ?? 0
+          }))
+      );
+      if (synced.added.length > 0) {
+        log.info(`已把 Planner 里的 ${synced.added.length} 部番补进本地清单（Planner 不可用时的兜底）：${synced.added.join('、')}`);
+      }
+    } catch (error) {
+      log.debug(`同步本地清单失败：${(error as Error).message}`);
+    }
+  }
 
   const report: AutoReport = { subjects: gaps.length, checked: 0, downloaded: [], skipped: [], source: 'planner' };
   if (gaps.length === 0) {

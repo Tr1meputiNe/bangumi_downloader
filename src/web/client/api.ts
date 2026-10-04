@@ -191,6 +191,17 @@ export type VerifyTaskResult = {
 
 /* ---------------------------- 追番计划 ---------------------------- */
 
+export type PlannerEpisodeView = {
+  ep: number | null;
+  sort: number;
+  title: string;
+  airdate: string;
+  airTime: string | null;
+  watched: boolean;
+  aired: boolean;
+  dismissed: boolean;
+};
+
 export type PlannerSubjectView = {
   id: number;
   name: string;
@@ -201,6 +212,8 @@ export type PlannerSubjectView = {
   unwatched: number;
   totalEpisodes: number;
   watchedEpisodes: number;
+  /** 总集数是否已经确定。 */
+  totalEpisodesKnown: boolean;
   airDate: string | null;
   url: string | null;
   image: string | null;
@@ -233,6 +246,10 @@ export type PlanRow = {
   subjectId: number;
   name: string;
   episode: number | null;
+  totalEpisodes: number;
+  watchedEpisodes: number;
+  unwatchedEpisodes: number;
+  totalEpisodesKnown: boolean;
   airdate: string;
   airTime: string | null;
   broadcastAt: string | null;
@@ -457,6 +474,9 @@ export const api = {
   open: (path: string) => post<{ ok: boolean; message: string }>('/api/open', { path }),
 
   watchlist: () => request<WatchlistResponse>('/api/watchlist'),
+  watchlistSync: () => post<WatchlistResponse & { added: string[] }>('/api/watchlist/sync', {}),
+  plannerSubject: (id: number) =>
+    request<{ subjectId: number; episodes: PlannerEpisodeView[] }>(`/api/planner/subject?id=${id}`),
   watchlistAdd: (entry: Record<string, unknown>) => post<WatchlistResponse>('/api/watchlist', { action: 'add', entry }),
   watchlistUpdate: (originalQuery: string, entry: Record<string, unknown>) =>
     post<WatchlistResponse>('/api/watchlist', { action: 'update', originalQuery, entry }),

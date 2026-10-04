@@ -283,6 +283,71 @@ a:hover {
   font-weight: 600;
 }
 
+.progress-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-bar {
+  display: inline-block;
+  width: 46px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.mini-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+
+.planner-table .table-head,
+.planner-table .table-row {
+  grid-template-columns: minmax(0, 2fr) 130px 70px minmax(0, 1.2fr) 70px;
+}
+
+.episode-panel {
+  padding: 10px 12px;
+  border-top: 1px dashed var(--line);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.episode-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.episode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.episode-chip.watched {
+  border-color: rgba(62, 207, 142, 0.45);
+  color: var(--ok);
+}
+
+.episode-chip.aired {
+  border-color: rgba(245, 165, 36, 0.5);
+  color: var(--warn);
+}
+
+.episode-chip.future {
+  color: var(--dim);
+}
+
 .running-box {
   display: flex;
   flex-direction: column;
@@ -310,7 +375,7 @@ a:hover {
 .plan-head,
 .plan-row {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 40px 96px minmax(0, 1.4fr);
+  grid-template-columns: 96px minmax(0, 1fr) 40px 96px 96px minmax(0, 1.4fr);
   gap: 10px;
   align-items: center;
   padding: 6px 10px;

@@ -133,6 +133,46 @@ export function nextEpisodeOf(entry: WatchEntry): number {
   return Math.max(last + 1, start);
 }
 
+/**
+ * 把 Planner 里「在看」的番同步进本地清单。
+ *
+ * 为什么要做：本地清单是 Planner 连不上时的兜底数据源，但它得靠人手工维护 ——
+ * 实测那台机器上清单里只有 1 条，而 Planner 里有 8 部在看。
+ * 也就是说 Planner 一挂，自动化就只剩那 1 条在追，其余 7 部静默停摆。
+ *
+ * 合并规则（保守，不碰用户的东西）：
+ *   - 清单里已经有同名的：**原样不动**（用户的进度、备注、禁用状态优先）
+ *   - 清单里没有的：补一条，`startFrom` 取「Planner 已看 + 1」，
+ *     这样兜底模式追的集数和 Planner 一致（都是没看过的那几集）
+ */
+export function syncFromPlanner(
+  path: string,
+  subjects: ReadonlyArray<{ name: string; eps: number; epStatus: number; unwatched: number }>
+): { added: string[]; list: Watchlist } {
+  const list = loadWatchlist(path);
+  const known = new Set(list.entries.map((entry) => entry.query.trim()));
+  const added: string[] = [];
+
+  for (const subject of subjects) {
+    const query = subject.name.trim();
+    if (query === '' || known.has(query)) continue;
+
+    const startFrom = Math.max(1, (subject.epStatus ?? 0) + 1);
+    const total = subject.eps > 0 ? `共 ${subject.eps} 集` : '总集数未知';
+    list.entries.push({
+      query,
+      startFrom,
+      enabled: true,
+      note: `由 Watch Planner 同步（已看 ${subject.epStatus}/${total.replace('共 ', '').replace(' 集', '')}，未看 ${subject.unwatched}）`
+    });
+    known.add(query);
+    added.push(query);
+  }
+
+  if (added.length > 0) saveWatchlist(path, list);
+  return { added, list };
+}
+
 /** 写一份示例清单，方便用户照着改。已存在时不覆盖。 */
 export function ensureWatchlistExample(path: string): boolean {
   if (existsSync(path)) return false;

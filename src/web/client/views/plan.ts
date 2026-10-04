@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { html } from '../html.js';
-import { api, type PlanRow, type ScheduleResponse, type WatchEntryView, type WatchlistResponse } from '../api.js';
+import {
+  api,
+  type PlanRow,
+  type PlannerEpisodeView,
+  type ScheduleResponse,
+  type WatchEntryView,
+  type WatchlistResponse
+} from '../api.js';
 import { Badge, Card, Empty, ProgressBar, Spinner, StatusDot } from '../components.js';
 import { compactEpisodes, formatClock, formatSize, formatSpeed, relativeTime, shortenPath } from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
@@ -62,6 +69,9 @@ export function PlanView() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  const [expandedSubject, setExpandedSubject] = useState<number | null>(null);
+  const [episodes, setEpisodes] = useState<Record<number, PlannerEpisodeView[]>>({});
+  const [episodesLoading, setEpisodesLoading] = useState<number | null>(null);
   const [form, setForm] = useState({ query: '', lastEpisode: '', startFrom: '', note: '' });
 
   const load = useCallback(async () => {
@@ -124,6 +134,45 @@ export function PlanView() {
     },
     [form]
   );
+
+  /** 展开某部番：按需取它的逐集观看状态。 */
+  const toggleSubject = useCallback(
+    async (id: number) => {
+      if (expandedSubject === id) {
+        setExpandedSubject(null);
+        return;
+      }
+      setExpandedSubject(id);
+      if (episodes[id]) return;
+      setEpisodesLoading(id);
+      try {
+        const result = await api.plannerSubject(id);
+        setEpisodes((prev) => ({ ...prev, [id]: result.episodes }));
+      } catch (err) {
+        notify('err', err instanceof Error ? err.message : String(err));
+      } finally {
+        setEpisodesLoading(null);
+      }
+    },
+    [expandedSubject, episodes]
+  );
+
+  /** 把 Planner 里在看的番补进本地清单。 */
+  const syncWatchlist = useCallback(async () => {
+    setBusy(true);
+    try {
+      const result = await api.watchlistSync();
+      setData(result);
+      notify(
+        result.added.length > 0 ? 'ok' : 'info',
+        result.added.length > 0 ? `补进 ${result.added.length} 部：${result.added.join('、')}` : '本地清单已经和 Planner 一致'
+      );
+    } catch (err) {
+      notify('err', err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   /** 把最新计划写进计划任务的触发器。 */
   const syncTask = useCallback(async () => {
@@ -238,6 +287,7 @@ export function PlanView() {
                           <span>播出</span>
                           <span>番剧</span>
                           <span>集</span>
+                          <span>进度</span>
                           <span>该取片源</span>
                           <span>状态</span>
                         </div>
@@ -251,6 +301,13 @@ export function PlanView() {
                               </span>
                               <span class="ellipsis" title=${row.name}>${row.name}</span>
                               <span class="mono small">${row.episode ?? '?'}</span>
+                              <span class="progress-cell" title=${`已看 ${row.watchedEpisodes} 集${row.totalEpisodesKnown ? ` / 共 ${row.totalEpisodes} 集` : '（总集数未定）'}`}>
+                                <span class="mono small">${row.watchedEpisodes}${row.totalEpisodesKnown ? `/${row.totalEpisodes}` : '/?'}</span>
+                                <span class="mini-bar"><span
+                                  class="mini-bar-fill"
+                                  style=${`width:${row.totalEpisodes > 0 ? Math.min(100, Math.round((row.watchedEpisodes / row.totalEpisodes) * 100)) : 0}%`}
+                                ></span></span>
+                              </span>
                               <span class="mono small dim">${row.readyAt ? formatClockText(row.readyAt) : '—'}</span>
                               <span>
                                 <${Badge} kind=${PLAN_ROW_BADGE[row.status]}>${row.statusText}</${Badge}>
@@ -334,8 +391,21 @@ export function PlanView() {
 
       <${Card}
         title="追番清单"
-        hint=${data?.file ? html`文件：<span class="mono">${data.file}</span>` : '还没有追番清单文件'}
-        actions=${html`<button type="button" class="ghost small" onClick=${() => void load()}>刷新</button>`}
+        hint=${data?.file
+          ? html`文件：<span class="mono">${data.file}</span> · Planner 连不上时用它兜底`
+          : '还没有追番清单文件'}
+        actions=${html`
+          <button type="button" class="ghost small" onClick=${() => void load()}>刷新</button>
+          <button
+            type="button"
+            class="ghost small"
+            disabled=${busy || !planner?.ok}
+            title="把 Planner 里「在看」的番补进本地清单（只补缺，不动你已有的条目）"
+            onClick=${() => void syncWatchlist()}
+          >
+            从 Planner 同步
+          </button>
+        `}
       >
         <div class="add-row">
           <input
@@ -474,27 +544,73 @@ export function PlanView() {
             ? planner.subjects.length === 0
               ? html`<${Empty} text="Planner 里没有「未看完」的番剧" hint="在 Planner 页面把番剧标记为「在看」" />`
               : html`
-                  <div class="table">
+                  <div class="table planner-table">
                     <div class="table-head">
                       <span>番剧</span>
-                      <span>状态</span>
+                      <span>已看 / 总集数</span>
                       <span>未看</span>
                       <span>下一集</span>
+                      <span class="right">逐集</span>
                     </div>
-                    ${planner.subjects.map(
-                      (subject) => html`
+                    ${planner.subjects.map((subject) => {
+                      const open = expandedSubject === subject.id;
+                      return html`
                         <div class="table-row">
-                          <span class="ellipsis" title=${subject.display}>${subject.display}</span>
-                          <span><${Badge}>${subject.collectionLabel}</${Badge}></span>
-                          <span class="mono">${subject.unwatched} 集</span>
+                          <span class="ellipsis" title=${subject.display}>
+                            ${subject.display}
+                            ${subject.collectionType === 3 ? null : html` <${Badge}>${subject.collectionLabel}</${Badge}>`}
+                          </span>
+                          <span class="progress-cell">
+                            <span class="mono small">
+                              ${subject.watchedEpisodes}${subject.totalEpisodesKnown ? `/${subject.totalEpisodes}` : '/?'}
+                            </span>
+                            <span class="mini-bar"><span
+                              class="mini-bar-fill"
+                              style=${`width:${subject.totalEpisodes > 0 ? Math.min(100, Math.round((subject.watchedEpisodes / subject.totalEpisodes) * 100)) : 0}%`}
+                            ></span></span>
+                          </span>
+                          <span class="mono small">${subject.unwatched} 集</span>
                           <span class="dim small">
                             ${subject.nextEpisode
                               ? `第 ${subject.nextEpisode.ep ?? '?'} 集 · ${subject.nextEpisode.airdate} ${subject.nextEpisode.airTime ?? ''}`
                               : '—'}
                           </span>
+                          <span class="row-actions">
+                            <button
+                              type="button"
+                              class="ghost small"
+                              onClick=${() => void toggleSubject(subject.id)}
+                            >${open ? '收起' : '展开'}</button>
+                          </span>
                         </div>
-                      `
-                    )}
+                        ${open &&
+                        html`
+                          <div class="episode-panel">
+                            ${episodesLoading === subject.id
+                              ? html`<${Spinner} label="读取分集…" />`
+                              : (episodes[subject.id] ?? []).length === 0
+                                ? html`<div class="dim small">没读到分集信息</div>`
+                                : html`
+                                    <div class="episode-grid">
+                                      ${(episodes[subject.id] ?? []).map(
+                                        (episode) => html`
+                                          <span
+                                            class=${`episode-chip ${episode.watched ? 'watched' : episode.aired ? 'aired' : 'future'}`}
+                                            title=${`第 ${episode.ep ?? '?'} 集 · ${episode.airdate} ${episode.airTime ?? ''}${episode.watched ? ' · 已看' : episode.aired ? ' · 已播出未看' : ' · 未播出'}`}
+                                          >
+                                            ${episode.ep ?? '?'}
+                                          </span>
+                                        `
+                                      )}
+                                    </div>
+                                    <div class="dim small">
+                                      绿=已看，橙=已播出未看（这些是会自动下载的），灰=未播出
+                                    </div>
+                                  `}
+                          </div>
+                        `}
+                      `;
+                    })}
                   </div>
                 `
             : html`<div class="dim small">
