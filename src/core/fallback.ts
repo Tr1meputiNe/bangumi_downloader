@@ -45,13 +45,18 @@ export type FallbackOptions = {
    */
   probeExisting?: boolean;
   /**
-   * 续传那一份最多先给多久（毫秒，默认 15 分钟）。
+   * 续传那一份先观察多久（毫秒，默认 15 分钟）。
    *
-   * 为什么要有上限：磁盘上那份进度可能是**死种**留下的。
-   * 之前续传会一口气吃掉整个时间预算（几小时），期间新发布的、
-   * 做种多得多的字幕组版本根本没机会被试到。
+   * 注意这是**观察窗口**，不是硬性中断：窗口结束时看它到底拿到了多少 ——
+   *   - 拿得动（≥ minResumeGainBytes）：继续用它下到底，绝不打断健康下载
+   *   - 拿不动：把它记成兜底结果，去试别的候选（可能是新发布的更好版本）
+   *
+   * 之前这里是「到点就掐」，于是 86% 下到一半的健康下载被硬生生切断，
+   * 用户看到的就是「15 分钟之内没下完就被中断」。
    */
   resumeSliceMs?: number;
+  /** 观察窗口内至少拿到这么多字节才算「拿得动」。默认 8MB。 */
+  minResumeGainBytes?: number;
   /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
   configPath?: string;
   /** 下载过程中的进度回调（界面上的「正在下载」用它）。 */
@@ -297,13 +302,53 @@ async function resumeExisting(
   // 续传先给一段有界的时间（默认 15 分钟）：够它把「有速度」证明出来，
   // 又不至于把整个预算吃光、让后面新发布的候选完全没机会。
   const slice = Math.max(60_000, Math.min(budget, options.resumeSliceMs ?? RESUME_SLICE_MS));
-  const outcome = await runAttempt(bestCandidate, {
+  const first = await runAttempt(bestCandidate, {
     ...options,
     trialSeconds: Math.floor(slice / 1000),
     remainingMs: slice,
     // 续传时跳过热身性质的试跑判断，直接把这段时间给它
     resume: true
   });
+
+  /*
+   * 观察窗口结束：还在动就让它继续下到底。
+   *
+   * 这里以前是「到点就交差」，结果一条已经下到 86%、速度 1.2 MB/s 的健康下载
+   * 被硬切断，然后去试别的慢候选 —— 用户报的「15 分钟之内没下完会被中断」
+   * 就是这个。下载这事情，只要在动就该让它动完。
+   */
+  const minGain = options.minResumeGainBytes ?? 8 * 1024 * 1024;
+  if (!first.completed && first.bytesWritten - 0 >= minGain && first.bytesWritten > bestBytes) {
+    const remaining = Math.max(60_000, budget - slice);
+    log.info(
+      `续传这一段拿到了 ${formatSize(first.bytesWritten)}（在动），继续用它下到底（剩余预算 ${Math.round(remaining / 60_000)} 分钟）`
+    );
+    const rest = await runAttempt(bestCandidate, {
+      ...options,
+      trialSeconds: Math.floor(remaining / 1000),
+      remainingMs: remaining,
+      resume: true
+    });
+    return {
+      infoHash: rest.infoHash,
+      title: bestCandidate.result.title,
+      files: filesOf(rest),
+      bytesWritten: rest.bytesWritten,
+      completed: rest.completed,
+      resumedBytes: bestBytes,
+      attempts: [
+        {
+          title: bestCandidate.result.title,
+          infoHash: rest.infoHash,
+          bytes: rest.bytesWritten,
+          throughput: rest.throughput,
+          reason: rest.completed ? '续传完成' : rest.reason
+        }
+      ]
+    };
+  }
+
+  const outcome = first;
 
   return {
     infoHash: outcome.infoHash,
