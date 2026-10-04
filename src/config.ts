@@ -53,6 +53,11 @@ export type DownloadPreference = {
   stallTimeoutMs?: number;
   /** download 命令探活几条候选（按真实做种数挑最可能下得动的）。默认 10。 */
   probeCandidates?: number;
+  /**
+   * verify 扫描本地内容时要跳过的顶层目录名。
+   * 程序自己的目录（含 bangumi-downloader.exe）会被自动识别并跳过，这里用于额外排除。
+   */
+  ignoreDirs?: string[];
   /** 每条候选试跑多少秒来判断「下不下得动」。默认 90。 */
   trialSeconds?: number;
   /** 试跑期最低吞吐（KB/s），低于它就换下一条。默认 40。 */
@@ -199,6 +204,7 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     timeoutMs: 60 * 60_000,
     stallTimeoutMs: 3 * 60_000,
     probeCandidates: 10,
+    ignoreDirs: [],
     trialSeconds: 90,
     minThroughputKBps: 30,
     maxAttempts: 8,

@@ -441,7 +441,8 @@ async function cmdVerify(
     infoHash: options.infoHash,
     cleanEmpty: options.cleanEmpty,
     addLocal: options.addLocal,
-    checkPlayable: options.checkPlayable
+    checkPlayable: options.checkPlayable,
+    ignoreDirs: config.download.ignoreDirs ?? []
   });
 
   if (result.reports.length === 0) {

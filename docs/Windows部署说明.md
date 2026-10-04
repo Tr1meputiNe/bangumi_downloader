@@ -1,7 +1,23 @@
 # Windows 部署说明（bangumi-downloader）
 
-这份说明是给**这台 Windows 机器**（`D:\bangumi-downloader`）写的，记录它实际怎么装的、
-怎么用、以及踩过的坑。项目本身的完整文档在 [README.md](README.md)。
+这份说明是给**这台 Windows 机器**写的，记录它实际怎么装的、怎么用、以及踩过的坑。
+
+**目录布局**（软件和下载内容放在一起，但各自独立不混）：
+
+```
+D:\anime_download\
+├── bangumi-downloader\        ← 软件本体（源码 + 构建产物 + 配置 + 日志）
+├── .bangumi-meta\             ← 校验缓存与本地清单（别删）
+├── [BDrip] Hibike Euphonium S03 [Sakurato&7³ACG]\    ← 下载的番剧
+└── [LinRip] Sound Euphonium Movie Part1 …\           ← 以及自己放进去的片子
+```
+
+软件之所以放成**子目录**而不是直接铺在 `D:\anime_download` 根下：
+根目录是「下载目录」，程序会自动扫描它来统计内容，
+混在一起会把程序文件当成下载内容。扫描逻辑现在会自动识别并跳过程序目录
+（判据：目录里有没有 `bangumi-downloader.exe`），所以即使你把它放别处也不会误判。
+
+项目本身的完整文档在 [README.md](README.md)。
 
 ---
 
@@ -17,7 +33,7 @@
 | 自动追番（只跑一轮） | `7-run-once.cmd` | 适合放计划任务 |
 | 开机自动追番 | `5-install-startup.cmd` | 注册登录时启动的计划任务；`uninstall-startup.cmd` 取消 |
 
-所有命令都在 `D:\bangumi-downloader\release\windows\` 下，双击即用，不需要装 Node.js。
+所有命令都在 `D:\anime_download\bangumi-downloader\release\windows\` 下，双击即用，不需要装 Node.js。
 
 ---
 
@@ -228,7 +244,7 @@ bangumi-downloader.exe verify --add-local
 ### 手动触发 / 观察
 
 ```bat
-cd /d D:\bangumi-downloader\release\windows
+cd /d D:\anime_download\bangumi-downloader\release\windows
 
 bangumi-downloader.exe auto                  :: 立刻检查一轮
 bangumi-downloader.exe auto --dry-run        :: 只看会下什么，不下载
@@ -269,7 +285,7 @@ Get-ScheduledTaskInfo -TaskName BangumiDownloader
 **Q：想看每个 peer 到底卡在哪**
 
 ```bat
-cd /d D:\bangumi-downloader
+cd /d D:\anime_download\bangumi-downloader
 npx tsx scripts\diag-peer.ts <infohash>
 ```
 

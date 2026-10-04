@@ -63,6 +63,8 @@ export type VerifyOptions = {
   addLocal?: boolean;
   /** 是否做可播性抽检，默认做。 */
   checkPlayable?: boolean;
+  /** 扫描本地内容时要跳过的顶层目录名（程序目录会自动识别，这里用于额外排除）。 */
+  ignoreDirs?: readonly string[];
 };
 
 export function metadataDirOf(savePath: string, override?: string): string {
@@ -181,7 +183,11 @@ export function saveInventory(savePath: string, entries: InventoryEntry[], metad
  * 扫描下载目录，把「还没有被清单记录、也不是本项目下的」顶层目录加进清单。
  * 本项目的下载内容靠 .bangumi-meta/*.bin 识别，其余都算本地内容。
  */
-export function scanForLocalItems(savePath: string, metadataDir?: string): { added: InventoryEntry[]; entries: InventoryEntry[] } {
+export function scanForLocalItems(
+  savePath: string,
+  metadataDir?: string,
+  ignoreNames: readonly string[] = []
+): { added: InventoryEntry[]; entries: InventoryEntry[] } {
   const entries = loadInventory(savePath, metadataDir);
   const known = new Set(entries.map((e) => e.path));
   const managed = new Set(loadCachedMetas(savePath, metadataDir).map((m) => sanitize(m.name)));
@@ -198,8 +204,19 @@ export function scanForLocalItems(savePath: string, metadataDir?: string): { add
 
   for (const name of dirs) {
     if (known.has(name) || managed.has(name)) continue;
+    if (ignoreNames.includes(name)) continue;
+
     const full = join(savePath, name);
     if (countFiles(full) === 0) continue;
+    /*
+     * 跳过「程序自己的目录」。
+     *
+     * 场景：把软件放进了下载目录（例如 D:\anime_download\bangumi-downloader），
+     * 这样一切都在一处。但扫描逻辑会把任何顶层目录当成「本地下载内容」，
+     * 于是程序目录会被登记成一条动画条目 —— 明显不对。
+     * 用「里面有没有程序本体」自识别，比要求用户手工排除可靠。
+     */
+    if (looksLikeAppDirectory(full)) continue;
 
     const entry: InventoryEntry = {
       name,
@@ -211,6 +228,16 @@ export function scanForLocalItems(savePath: string, metadataDir?: string): { add
   }
 
   return { added, entries };
+}
+
+/** 这个目录是不是「程序自己」（里面有 bangumi-downloader.exe 或 package.json + release）。 */
+export function looksLikeAppDirectory(dir: string): boolean {
+  const markers = ['bangumi-downloader.exe', 'bangumi-downloader', join('release', 'windows', 'bangumi-downloader.exe')];
+  for (const marker of markers) {
+    if (existsSync(join(dir, marker))) return true;
+  }
+  // 源码目录：同时有 package.json 和 src/
+  return existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'src'));
 }
 
 /** 粗略判断是剧集还是剧场版：有多个视频文件且名字里带集号的多半是剧集。 */
@@ -327,7 +354,7 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
   const added: string[] = [];
 
   if (options.addLocal) {
-    const scan = scanForLocalItems(options.savePath, options.metadataDir);
+    const scan = scanForLocalItems(options.savePath, options.metadataDir, options.ignoreDirs ?? []);
     if (scan.added.length > 0) {
       saveInventory(options.savePath, scan.entries, options.metadataDir);
       for (const entry of scan.added) added.push(entry.name);

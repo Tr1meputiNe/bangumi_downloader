@@ -1,5 +1,5 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { closeSync, ftruncateSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkVideoFile, isVideoFile } from '../src/core/video-check.js';
@@ -213,5 +213,29 @@ describe('checkVideoFile', () => {
     const check = checkVideoFile(join(dir, 'nope.mkv'));
     expect(check.issues).toContain('unreadable');
     expect(check.playable).toBe(false);
+  });
+});
+
+describe('looksLikeAppDirectory（把软件放进下载目录时不该被当成下载内容）', () => {
+  it('含 bangumi-downloader.exe 的目录被识别为程序目录', async () => {
+    const { looksLikeAppDirectory } = await import('../src/core/verify.js');
+    const dir = tempDir();
+    writeFileSync(join(dir, 'bangumi-downloader.exe'), 'fake');
+    expect(looksLikeAppDirectory(dir)).toBe(true);
+  });
+
+  it('含 package.json + src 的源码目录也算程序目录', async () => {
+    const { looksLikeAppDirectory } = await import('../src/core/verify.js');
+    const dir = tempDir();
+    writeFileSync(join(dir, 'package.json'), '{}');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    expect(looksLikeAppDirectory(dir)).toBe(true);
+  });
+
+  it('普通动画目录不会被误判', async () => {
+    const { looksLikeAppDirectory } = await import('../src/core/verify.js');
+    const dir = tempDir();
+    writeFileSync(join(dir, 'E01.mkv'), 'x');
+    expect(looksLikeAppDirectory(dir)).toBe(false);
   });
 });
