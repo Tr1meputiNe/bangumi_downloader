@@ -8,7 +8,7 @@ import { resolveBackend } from '../core/dispatch.js';
 import { JobQueue } from '../core/jobs.js';
 import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
-import { expandQueries, filterBySeason, loadAliases } from '../core/alias.js';
+import { dedupeByTitle, expandQueries, filterBySeason, loadAliases, orderBySeason } from '../core/alias.js';
 import {
   loadWatchlist,
   nextEpisodeOf,
@@ -393,9 +393,11 @@ async function handleSearch(deps: WebDeps, url: URL, response: ServerResponse): 
    * 过滤后一条不剩时**退回未过滤的结果**并在提示里说明 —— 宁可给用户看到东西
    * 让他自己判断，也不要因为规则太严交出一片空白。
    */
-  const all = outcome.ranked;
+  const all = dedupeByTitle(outcome.ranked, (item) => item.result.title);
   const filtered = expansion.season === null ? all : filterBySeason(all, expansion.season, (item) => item.result.title);
-  const usable = filtered.length > 0 ? filtered : all;
+  // 过滤后一条不剩就退回未过滤的结果：宁可给用户看到东西让他自己判断，也别交白卷
+  const base = filtered.length > 0 ? filtered : all;
+  const usable = orderBySeason(base, expansion.season, (item) => item.result.title);
   const max = Number.isFinite(limit) && limit > 0 ? limit : 0;
   const ranked = max > 0 ? usable.slice(0, max) : usable;
 

@@ -192,7 +192,23 @@ export function expandQueries(
     }
   }
 
-  return { queries: queries.slice(0, limit), season };
+  /*
+   * 「京吹2」这种简称后面直接跟数字的写法没有空格，seasonOf 的裸数字规则认不出来
+   * （它要求名字和数字之间有空白，免得把集号当季数）。这里单独补一条：
+   * 只要数字是紧跟在某个**已知简称**后面的，就是季数。
+   */
+  let effectiveSeason = season;
+  if (effectiveSeason === null) {
+    for (const nickname of Object.keys(aliases)) {
+      const match = new RegExp(`${escapeRegExp(nickname)}\\s*([1-9])(?![0-9])`).exec(trimmed);
+      if (match?.[1]) {
+        effectiveSeason = Number(match[1]);
+        break;
+      }
+    }
+  }
+
+  return { queries: queries.slice(0, limit), season: effectiveSeason };
 }
 
 function escapeRegExp(value: string): string {
@@ -214,4 +230,35 @@ export function filterBySeason<T>(items: readonly T[], season: number | null, ti
     const found = titleSeason(titleOf(item));
     return found === null || found === season;
   });
+}
+
+/**
+ * 按季排序：标题里明确写了这一季的排前面，没写季数的排后面。
+ *
+ * 为什么需要：只过滤不排序的话，搜「第一季」时剧场版、OVA 这些
+ * **标题里根本不写季数**的东西会排在最前面（实测搜「京吹 第一季」，
+ * 前几条全是剧场版和莉兹与青鸟），真正要的 TV 第一季反而在后面。
+ */
+export function orderBySeason<T>(items: readonly T[], season: number | null, titleOf: (item: T) => string): T[] {
+  if (season === null) return [...items];
+  const exact: T[] = [];
+  const unknown: T[] = [];
+  for (const item of items) {
+    if (titleSeason(titleOf(item)) === season) exact.push(item);
+    else unknown.push(item);
+  }
+  return [...exact, ...unknown];
+}
+
+/** 同一条发布可能从多个源/多个关键词重复命中，按规范化标题去重（保留靠前的）。 */
+export function dedupeByTitle<T>(items: readonly T[], titleOf: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const key = titleOf(item).toLowerCase().replace(/[\s[\]（）()【】_]+/g, '');
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }
