@@ -1204,7 +1204,22 @@ function handleLogs(deps: WebDeps, url: URL, response: ServerResponse): void {
 
 /** 惰性创建队列：测试里可以不传，直接用一个内部实例。 */
 function ensureJobs(deps: WebDeps): JobQueue {
-  deps.jobs ??= new JobQueue({ config: deps.config, configPath: deps.configPath, qbittorrent: deps.qbittorrent });
+  if (!deps.jobs) {
+    /*
+     * 队列落盘：程序重启（更新、崩溃、计划任务重启）后，没下完的任务自动接着下。
+     * 实测被用户连着抓到两次「我添加的任务怎么没了」——数据其实都在磁盘上，
+     * 丢的只是「待办」这件事本身。
+     */
+    const queueFile = deps.configPath ? join(dirname(deps.configPath), 'data', 'queue.json') : undefined;
+    deps.jobs = new JobQueue({
+      config: deps.config,
+      configPath: deps.configPath,
+      qbittorrent: deps.qbittorrent,
+      statePath: queueFile
+    });
+    const restored = deps.jobs.restore();
+    if (restored > 0) log.info(`启动时恢复了 ${restored} 个没下完的下载任务`);
+  }
   return deps.jobs;
 }
 

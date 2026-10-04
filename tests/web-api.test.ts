@@ -563,3 +563,58 @@ describe('有进度的失败会自动重试，而不是判死', () => {
     expect(job.messages.some((line) => line.includes('不会重下'))).toBe(true);
   });
 });
+
+describe('队列落盘：重启后没下完的任务自动接着下', () => {
+  it('入队的任务会写进队列文件，恢复时重新排队', async () => {
+    const { JobQueue } = await import('../src/core/jobs.js');
+    const dir = mkdtempSync(join(tmpdir(), 'queue-'));
+    const statePath = join(dir, 'queue.json');
+    const config = { download: { backend: 'builtin', savePath: dir }, qbittorrent: { savePath: dir } } as never;
+
+    try {
+      // 一个永远不会自己结束的「下载」，模拟正在下的时候程序被重启
+      const stalling = (async () => new Promise(() => {})) as never;
+      const first = new JobQueue({ config, statePath, dispatch: stalling });
+      first.enqueue({ title: '没下完的番', magnet: `magnet:?xt=urn:btih:${'f'.repeat(40)}`, sizeBytes: 1234 });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // 落盘的内容应该包含这条（running 也要记，重启后重新排队）
+      const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { jobs: Array<{ title: string; status: string }> };
+      expect(saved.jobs).toHaveLength(1);
+      expect(saved.jobs[0]?.title).toBe('没下完的番');
+      expect(saved.jobs[0]?.status).toBe('queued');
+
+      // 新进程启动：restore 应该把它重新排上
+      const second = new JobQueue({ config, statePath, dispatch: stalling });
+      expect(second.restore()).toBe(1);
+      const job = second.list()[0]!;
+      expect(job.title).toBe('没下完的番');
+      expect(job.messages.some((line) => line.includes('重启后自动恢复'))).toBe(true);
+
+      // 重复恢复不会加两遍
+      expect(second.restore()).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('下完的任务不再留在队列文件里', async () => {
+    const { JobQueue } = await import('../src/core/jobs.js');
+    const dir = mkdtempSync(join(tmpdir(), 'queue-'));
+    const statePath = join(dir, 'queue.json');
+    const config = { download: { backend: 'builtin', savePath: dir }, qbittorrent: { savePath: dir } } as never;
+    try {
+      const queue = new JobQueue({
+        config,
+        statePath,
+        dispatch: (async () => ({ files: ['/tmp/a.mkv'], fileCount: 1, backend: 'builtin' })) as never
+      });
+      queue.enqueue({ title: '下完的番', magnet: `magnet:?xt=urn:btih:${'a'.repeat(40)}` });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const saved = JSON.parse(readFileSync(statePath, 'utf8')) as { jobs: unknown[] };
+      expect(saved.jobs).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

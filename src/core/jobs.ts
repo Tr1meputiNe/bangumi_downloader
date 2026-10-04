@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { AppConfig } from '../config.js';
 import type { QbittorrentClient } from '../qbittorrent/client.js';
 import { dispatchDownload } from './dispatch.js';
@@ -87,6 +89,15 @@ type JobDeps = {
   configPath?: string;
   /** 覆盖下载实现（测试用）。 */
   dispatch?: typeof dispatchDownload;
+  /**
+   * 队列落盘的位置（例如 data/queue.json）。
+   *
+   * 为什么要落盘：队列原来只在内存里，程序一重启（更新、崩溃、计划任务重启）
+   * 没下完和排队的任务就全没了 —— 实测被用户连着抓到两次
+   * 「我添加的任务怎么没了」。数据在磁盘上（已校验的分片会跳过重下），
+   * 只要把「待办」记住，重启后自动续上即可。
+   */
+  statePath?: string;
 };
 
 const MAX_MESSAGES = 40;
@@ -95,6 +106,8 @@ const MAX_FINISHED_JOBS = 50;
 const MAX_RETRIES = 3;
 /** 自动重试前的等待，给 peer 一点轮换的时间。 */
 const RETRY_DELAY_MS = 60_000;
+/** 队列文件里最多保留多少条待办。 */
+const MAX_PERSISTED = 30;
 
 export class JobQueue extends EventEmitter {
   #jobs = new Map<string, DownloadJob>();
@@ -113,6 +126,78 @@ export class JobQueue extends EventEmitter {
   }
 
   /** 入队一条下载任务，立刻返回任务对象（不等待下载）。 */
+  /**
+   * 把还没跑完的任务写进磁盘，重启后能接着跑。
+   *
+   * 只记「待办」：queued / running / paused 三种。已完成、失败、取消的不记。
+   */
+  #persist(): void {
+    const path = this.#deps.statePath;
+    if (!path) return;
+    const pending = [...this.#jobs.values()]
+      .filter((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused')
+      .slice(-MAX_PERSISTED)
+      .map((job) => ({
+        title: job.title,
+        magnet: job.magnet,
+        torrentUrl: job.torrentUrl,
+        episodes: job.episodes,
+        sizeBytes: job.totalBytes ?? undefined,
+        downloadedBytes: job.downloadedBytes,
+        retries: job.retries,
+        // 重启后 running 的也要重新排队（原来是哪个进程在跑已经没了）
+        status: job.status === 'running' ? 'queued' : job.status
+      }));
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify({ version: 1, jobs: pending }, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      log.warn(`队列落盘失败：${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * 从磁盘恢复上次没跑完的任务（程序启动时调一次）。
+   *
+   * 恢复出来的任务会标注「程序重启后自动恢复」，进度从已校验的分片继续。
+   */
+  restore(): number {
+    const path = this.#deps.statePath;
+    if (!path || !existsSync(path)) return 0;
+    let saved: Array<Partial<EnqueueInput> & { status?: string }> = [];
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as { jobs?: unknown };
+      saved = Array.isArray(parsed.jobs) ? (parsed.jobs as typeof saved) : [];
+    } catch (error) {
+      log.warn(`队列文件解析失败，忽略：${(error as Error).message}`);
+      return 0;
+    }
+
+    let restored = 0;
+    for (const item of saved) {
+      if (typeof item.title !== 'string' || item.title === '') continue;
+      if (!item.magnet && !item.torrentUrl) continue;
+      // 已经在队列里的（同标题同磁力）不重复加
+      const exists = [...this.#jobs.values()].some(
+        (job) => job.title === item.title && job.magnet === (item.magnet ?? '') && job.status !== 'cancelled'
+      );
+      if (exists) continue;
+
+      const job = this.enqueue({
+        title: item.title,
+        magnet: item.magnet,
+        torrentUrl: item.torrentUrl,
+        episodes: item.episodes,
+        sizeBytes: item.sizeBytes
+      });
+      if (job.status === 'paused') job.status = 'queued';
+      this.#note(job, '程序重启后自动恢复（已校验的分片不会重下）');
+      restored += 1;
+    }
+    if (restored > 0) log.info(`从队列文件恢复了 ${restored} 个没下完的任务`);
+    return restored;
+  }
+
   enqueue(input: EnqueueInput): DownloadJob {
     const job: DownloadJob = {
       id: `job-${++this.#counter}-${Date.now().toString(36)}`,
@@ -139,6 +224,7 @@ export class JobQueue extends EventEmitter {
     this.#jobs.set(job.id, job);
     this.#pending.push(job.id);
     this.#trimFinished();
+    this.#persist();
     log.info(`任务入队：${job.id}（${input.title.slice(0, 60)}）`);
 
     // 不 await：立即把控制权还给 HTTP 处理
@@ -243,6 +329,7 @@ export class JobQueue extends EventEmitter {
   }
 
   #setStatus(job: DownloadJob, status: JobStatus): void {
+    if (job.status !== status) queueMicrotask(() => this.#persist());
     job.status = status;
     this.emit('update', job);
   }
