@@ -1,0 +1,5 @@
+{
+  "//": "构建时的类型检查范围：只查 src。构建机（那台 Windows）不一定会去装测试用的依赖（jsdom 之类），而打包产物只包含 src —— 测试文件的类型检查在开发机上跑。",
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.ts"]
+}

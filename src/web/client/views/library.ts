@@ -264,16 +264,17 @@ function summarizeVerify(result: unknown) {
 }
 
 function verifyBadge(report: VerifyReportView) {
+  // 目录都不在，就别报「空壳」—— 那会让人以为下过又坏了
+  if (!report.dirExists) return html`<${Badge} title=${`找不到：${report.dir}`}>找不到</${Badge}>`;
+
   if (report.source === 'local') {
-    return html`<${Badge} title="本地内容没有分片哈希，只能做文件层面检查">本地</${Badge}>`;
+    return report.empty
+      ? html`<${Badge} kind="warn" title="目录在，但里面没有能播的内容">无内容</${Badge}>`
+      : html`<${Badge} title="本地内容没有分片哈希，只能做文件层面检查">本地</${Badge}>`;
   }
   if (report.complete) return html`<${Badge} kind="ok" title="全部分片校验通过">✓ 已下完</${Badge}>`;
   // 「目录还没有」和「下过但一个分片都没成」是两回事，别混成一句
-  if (report.empty) {
-    return report.dirExists
-      ? html`<${Badge} kind="bad" title="目录在，但一个有效分片都没有">空壳</${Badge}>`
-      : html`<${Badge} title="目录还没建，说明还没开始下">未下载</${Badge}>`;
-  }
+  if (report.empty) return html`<${Badge} kind="bad" title="目录在，但一个有效分片都没有">空壳</${Badge}>`;
   return html`<${Badge} kind="warn" title=${`${report.pieceDone}/${report.pieceTotal} 个分片`}>
     ${Math.round(report.ratio * 100)}%
   </${Badge}>`;
@@ -297,7 +298,7 @@ function verifyTable(result: unknown) {
       ${value.reports.map(
         (report) => html`
           <div class="table-row">
-            <span class="ellipsis" title=${report.path}>${report.name}</span>
+            <span class="ellipsis" title=${report.dir}>${verifyBadge(report)} ${report.name}</span>
             <span class="mono">
               ${report.source === 'local'
                 ? '—'

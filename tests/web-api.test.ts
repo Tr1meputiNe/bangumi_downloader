@@ -496,3 +496,35 @@ describe('下载任务：清理已结束的记录', () => {
     expect(after.jobs.find((job) => (job as { id: string }).id === id)).toBeUndefined();
   });
 });
+
+describe('核对任务：把清单里过时的位置记录改过来', () => {
+  it('内容在番剧目录里、清单还记着根目录时，核对后清单被修正', async () => {
+    const h = await harness();
+    const { saveInventory, loadInventory } = await import('../src/core/verify.js');
+
+    try {
+      // 内容实际在 番剧/A 番 下，但清单里只记了名字（迁移前的记录）
+      saveInventory(h.root, [{ name: 'A 番', path: 'A 番', kind: 'series' }]);
+      // 这条用例要跑真的核对逻辑，所以把执行体换回真实实现
+      setVerifyRunner(runVerifyTask);
+
+      const response = await post(`${h.started.url}api/library/verify`, { checkPlayable: false });
+      expect(response.status).toBe(200);
+      const { taskId } = await json<{ taskId: string }>(response);
+
+      const deadline = Date.now() + 5000;
+      let status = 'running';
+      while (Date.now() < deadline && status === 'running') {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const body = await json<{ tasks: Array<{ id: string; status: string }> }>(await fetch(`${h.started.url}api/tasks`));
+        status = body.tasks.find((task) => task.id === taskId)?.status ?? 'running';
+      }
+
+      expect(status).toBe('done');
+      expect(loadInventory(h.root).find((entry) => entry.name === 'A 番')?.path).toBe('番剧/A 番');
+    } finally {
+      setVerifyRunner(runVerifyTask);
+      await h.close();
+    }
+  });
+});

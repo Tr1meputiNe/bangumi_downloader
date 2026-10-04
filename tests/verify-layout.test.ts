@@ -207,6 +207,41 @@ describe('核对：内容位置', () => {
   });
 });
 
+describe('核对：本地内容的记录会自己修正', () => {
+  it('清单里还记着旧位置（根目录）时，按番剧目录找到并把记录改过来', async () => {
+    const { root, meta } = makeRoot({ name: 'Local Movie Show', files: [{ path: ['01.mkv'], length: PIECE }] });
+    track(root);
+
+    // 内容实际在番剧子目录里，但清单记的是根目录下的名字（迁移前的老记录）
+    const dir = join(root, '番剧', sanitizeSegment(meta.name));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '01.mkv'), Buffer.alloc(PIECE, 9));
+
+    const { saveInventory, loadInventory } = await import('../src/core/verify.js');
+    saveInventory(root, [{ name: sanitizeSegment(meta.name), path: sanitizeSegment(meta.name), kind: 'movie' }]);
+
+    const result = await verifyAll({ savePath: root, seriesDir: '番剧', checkPlayable: false });
+    const local = result.reports.find((report) => report.source === 'local');
+    expect(local?.dirExists).toBe(true);
+    expect(local?.relativePath).toBe(`番剧/${sanitizeSegment(meta.name)}`);
+    // 记录已经修正，下次核对直接命中
+    expect(loadInventory(root)[0]?.path).toBe(`番剧/${sanitizeSegment(meta.name)}`);
+  });
+
+  it('内容真的不在了就如实报「找不到」，并且不改记录', async () => {
+    const { root } = makeRoot({ name: 'Missing Show', files: [{ path: ['01.mkv'], length: PIECE }] });
+    track(root);
+
+    const { saveInventory, loadInventory } = await import('../src/core/verify.js');
+    saveInventory(root, [{ name: 'Deleted Show', path: 'Deleted Show', kind: 'movie' }]);
+
+    const result = await verifyAll({ savePath: root, seriesDir: '番剧', checkPlayable: false });
+    const local = result.reports.find((report) => report.name === 'Deleted Show');
+    expect(local?.dirExists).toBe(false);
+    expect(loadInventory(root).find((entry) => entry.name === 'Deleted Show')?.path).toBe('Deleted Show');
+  });
+});
+
 describe('核对：清理空壳', () => {
   it('只删真正空壳的那个目录，下完的和一半的都不动', async () => {
     const good = makeRoot({ name: 'Good Show', files: [{ path: ['01.mkv'], length: PIECE }] });

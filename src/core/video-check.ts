@@ -167,19 +167,57 @@ function detectContainer(head: Buffer): ContainerKind {
   return 'unknown';
 }
 
-/** moov 通常在文件开头；不在开头时去尾部找（faststart 与否的差别）。 */
+/**
+ * MP4 里有没有 moov（索引）。
+ *
+ * 做法：先在头部扫一遍字节（快路径，faststart 的文件 moov 就在开头），
+ * 没有的话**沿顶层 box 逐个跳**。
+ *
+ * 为什么不是「扫尾部一块」：实测踩过。一个 433MB 的正常 mp4，
+ * 顶层结构是 ftyp → free → mdat(431MB) → moov(1.44MB)，
+ * moov 确实是最后一个 box，但它有 1.44MB —— 只扫最后 1MB 的话
+ * 扫到的是 moov 的内部数据，看不到盒头那两个字节也没有 'moov' 字样，
+ * 于是把一个完全能播的文件报成「无法播放/拖动」。误报比不报更糟：
+ * 用户会开始不相信整个抽检结果。
+ *
+ * 顶层 box 只有 ftyp/free/mdat/moov 这么几个，逐个跳最多读几次，
+ * 既精确又便宜。
+ */
 function hasMoov(fd: number, size: number, head: Buffer): boolean {
   if (head.includes(Buffer.from('moov'))) return true;
-  if (size <= head.length) return false;
 
-  const tailLength = Math.min(1024 * 1024, size - head.length);
-  const tail = Buffer.alloc(tailLength);
-  try {
-    const read = readSync(fd, tail, 0, tailLength, size - tailLength);
-    return tail.subarray(0, read).includes(Buffer.from('moov'));
-  } catch {
-    return false;
+  let offset = 0;
+  for (let guard = 0; guard < 32 && offset + 8 <= size; guard += 1) {
+    const header = Buffer.alloc(16);
+    let read = 0;
+    try {
+      read = readSync(fd, header, 0, header.length, offset);
+    } catch {
+      return false;
+    }
+    if (read < 8) return false;
+
+    const type = header.subarray(4, 8).toString('latin1');
+    if (type === 'moov') return true;
+
+    let boxSize = header.readUInt32BE(0);
+    if (boxSize === 1) {
+      // 64 位长度：size 字段后面跟 8 字节真实长度
+      if (read < 16) return false;
+      const big = header.readBigUInt64BE(8);
+      if (big > BigInt(Number.MAX_SAFE_INTEGER)) return false;
+      boxSize = Number(big);
+    } else if (boxSize === 0) {
+      // 0 表示「一直到文件末尾」
+      boxSize = size - offset;
+    }
+
+    // 长度不合法说明结构已经坏了，再往下跳只会越跳越离谱
+    if (!(boxSize >= 8)) return false;
+    offset += boxSize;
   }
+
+  return false;
 }
 
 /**

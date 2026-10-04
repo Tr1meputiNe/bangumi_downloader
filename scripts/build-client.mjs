@@ -65,9 +65,16 @@ writeFileSync(
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} KB`;
 console.log(`前端构建完成：client.js ${kb(jsBytes.length)}，client.css ${kb(Buffer.byteLength(css))}`);
 
-// 顺手做一次类型检查，前端也走严格 TS
+/*
+ * 顺手做一次类型检查，前端也走严格 TS。
+ *
+ * 用 tsconfig.build.json（只查 src）而不是默认的 tsconfig.json：
+ * 打包机（那台 Windows）不一定装得上测试用的依赖（jsdom），
+ * 而默认配置会把 tests/ 一起查，于是「装不上 jsdom」会表现成「构建失败」——
+ * 现场排查过一次才发现原因。测试文件的类型检查在开发机上跑就行。
+ */
 try {
-  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '--noEmit'], {
+  execFileSync(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '--noEmit', '-p', 'tsconfig.build.json'], {
     cwd: root,
     stdio: 'inherit'
   });

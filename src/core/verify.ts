@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { metaFromInfoBytes, pieceSize, type TorrentMeta } from '../bittorrent/metainfo.js';
 // 目录名归一化复用存储层的实现，避免两处规则不一致
 import { TorrentStorage, sanitizeSegment as sanitize, sanitizeRelativePath } from '../bittorrent/storage.js';
@@ -31,6 +31,8 @@ export type TorrentVerifyReport = {
   dir: string;
   /** 那个目录在不在。不在 = 还没下过；在但 empty = 下过但一个分片都没成。 */
   dirExists: boolean;
+  /** 内容相对下载目录的路径（以实际找到的位置为准，带正斜杠）。 */
+  relativePath: string;
   /** 元数据里这个种子应有的文件数。 */
   expectedFiles: number;
   /** 目录里实际存在的文件数（不含填充文件）。 */
@@ -188,6 +190,7 @@ export function verifyTorrent(
     name: meta.name,
     dir,
     dirExists: location.exists,
+    relativePath: relativePathOf(savePath, dir),
     expectedFiles: meta.files.filter((file) => !/padding_file/i.test(file.path)).length,
     presentFiles: 0,
     pieceTotal: meta.pieceCount,
@@ -368,15 +371,60 @@ function detectKind(dir: string): InventoryEntry['kind'] {
   return 'other';
 }
 
+/** 把一个绝对路径换算成相对下载目录的写法（统一用正斜杠）。 */
+export function relativePathOf(savePath: string, dir: string): string {
+  const rel = relative(resolve(savePath), resolve(dir));
+  return rel.split(sep).join('/');
+}
+
+/**
+ * 本地内容实际在哪儿。
+ *
+ * 为什么不能直接用清单里记的 path：清单是历史记录。内容从「直接放在下载
+ * 根目录」改成「归纳进番剧子目录」之后，老记录还指着根目录，
+ * 于是核对时找不到文件，整条被报成「空壳」——看上去像内容丢了。
+ * 这里按「记录的位置 → 番剧目录下同名 → 根目录下同名」依次找，
+ * 找到就用，并让调用方有机会把记录改写过来。
+ */
+export function locateLocal(
+  entry: InventoryEntry,
+  savePath: string,
+  seriesDir?: string
+): { dir: string; exists: boolean; relativePath: string } {
+  const seriesRoot = seriesDir?.trim();
+  const name = basename(entry.path) || entry.name;
+
+  const candidates = [
+    ...(seriesRoot ? [join(savePath, sanitize(seriesRoot), name)] : []),
+    join(savePath, entry.path),
+    join(savePath, name)
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return { dir: candidate, exists: true, relativePath: relativePathOf(savePath, candidate) };
+    }
+  }
+
+  const fallback = join(savePath, entry.path);
+  return { dir: fallback, exists: false, relativePath: entry.path };
+}
+
 /** 对本地条目做基本检查（没有分片哈希，只能看文件层面）。 */
-export function verifyLocal(entry: InventoryEntry, savePath: string, options: { checkPlayable?: boolean } = {}): TorrentVerifyReport {
-  const dir = join(savePath, entry.path);
+export function verifyLocal(
+  entry: InventoryEntry,
+  savePath: string,
+  options: { checkPlayable?: boolean; seriesDir?: string } = {}
+): TorrentVerifyReport {
+  const location = locateLocal(entry, savePath, options.seriesDir);
+  const dir = location.dir;
   const report: TorrentVerifyReport = {
     source: 'local',
     infoHash: '',
     name: entry.name,
     dir,
-    dirExists: existsSync(dir),
+    dirExists: location.exists,
+    relativePath: location.relativePath,
     expectedFiles: 0,
     presentFiles: 0,
     pieceTotal: 0,
@@ -490,9 +538,29 @@ export async function verifyAll(options: VerifyOptions): Promise<VerifyAllResult
   }
 
   // 本地清单里的条目也一起纳入统计
-  for (const entry of loadInventory(options.savePath, options.metadataDir)) {
-    reports.push(verifyLocal(entry, options.savePath, { checkPlayable: options.checkPlayable }));
+  const inventory = loadInventory(options.savePath, options.metadataDir);
+  let relocated = 0;
+  for (const entry of inventory) {
+    const report = verifyLocal(entry, options.savePath, {
+      checkPlayable: options.checkPlayable,
+      seriesDir: options.seriesDir
+    });
+    reports.push(report);
+
+    /*
+     * 内容挪过地方就把清单记录改过来。
+     *
+     * 场景：内容原先在下载根目录，后来归纳进了「番剧」子目录，
+     * 老记录还指着根目录 —— 每次核对都报「找不到」，看着像东西丢了。
+     * 找到就顺手修正，下次核对直接命中。
+     */
+    if (report.dirExists && report.relativePath !== entry.path) {
+      log.info(`修正本地内容位置：${entry.path} → ${report.relativePath}`);
+      entry.path = report.relativePath;
+      relocated += 1;
+    }
   }
+  if (relocated > 0) saveInventory(options.savePath, inventory, options.metadataDir);
 
   return { reports, removed, added };
 }
@@ -505,7 +573,10 @@ export function printVerifyReport(report: TorrentVerifyReport): void {
     const broken = report.videosUnplayable > 0;
     const flag = report.empty ? '⬜' : broken ? '❌' : '📁';
     log.info(`${flag} 《${report.name}》`);
-    if (report.empty) {
+    if (!report.dirExists) {
+      // 「目录不在」和「目录在但没内容」是两回事，别都说成「没有任何能播的内容」
+      log.info(`     找不到这个目录：${report.dir}`);
+    } else if (report.empty) {
       log.info('     没有任何能播的内容');
     } else if (broken) {
       log.info(

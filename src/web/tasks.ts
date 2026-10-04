@@ -1,9 +1,9 @@
 import { rmSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { AppConfig } from '../config.js';
 import { runAuto, type AutoReport } from '../core/auto.js';
 import { acquireLock } from '../core/lock.js';
-import { loadCachedMetas, loadInventory, locateTorrent, saveInventory, scanForLocalItems, verifyLocal, verifyTorrent, type TorrentVerifyReport } from '../core/verify.js';
+import { loadCachedMetas, loadInventory, locateTorrent, relativePathOf, saveInventory, scanForLocalItems, verifyLocal, verifyTorrent, type TorrentVerifyReport } from '../core/verify.js';
 import { sanitizeSegment } from '../bittorrent/storage.js';
 import type { TorrentMeta } from '../bittorrent/metainfo.js';
 import { describeIssue } from '../core/video-check.js';
@@ -219,12 +219,11 @@ export type VerifyTaskOptions = {
   addLocal?: boolean;
 };
 
-function toVerifyView(report: TorrentVerifyReport, savePath: string): VerifyReportView {
-  const rel = relative(resolve(savePath), resolve(report.dir)).split(sep).join('/');
+function toVerifyView(report: TorrentVerifyReport): VerifyReportView {
   return {
     name: report.name,
-    // 目录不存在时 relative 仍会给出「本该在哪」，界面可以据此提示
-    path: rel === '' ? report.name : rel,
+    // 用核对时实际定位到的路径：清单里的老记录可能还指着旧位置
+    path: report.relativePath === '' ? report.name : report.relativePath,
     dir: report.dir,
     dirExists: report.dirExists,
     source: report.source,
@@ -268,7 +267,7 @@ export async function runVerifyTask(
   const checkPlayable = options.checkPlayable !== false;
 
   /** 落盘目录相对下载根目录的路径，用来和界面上的条目对上。 */
-  const relOf = (dir: string): string => relative(resolve(savePath), resolve(dir)).split(sep).join('/');
+  const relOf = (dir: string): string => relativePathOf(savePath, dir);
 
   /*
    * 只核对选中的那一条。
@@ -295,7 +294,12 @@ export async function runVerifyTask(
     }
   }
 
-  const inventory = loadInventory(savePath).filter((entry) => !target || entry.path === target || entry.name === target);
+  /*
+   * 本地清单：整个读进来（写回时不能把没核对到的条目弄丢），
+   * 只有被这次核对覆盖到的才参与。
+   */
+  const allInventory = loadInventory(savePath);
+  const inventory = allInventory.filter((entry) => !target || entry.path === target || entry.name === target);
 
   const total = metas.length + inventory.length;
   context.note(`核对目录：${savePath}`);
@@ -309,7 +313,7 @@ export async function runVerifyTask(
     const name = sanitizeSegment(meta.name);
     context.step(`核对 ${index + 1}/${total}：${name}`, total === 0 ? null : index / total);
     const report = verifyTorrent(meta, savePath, { checkPlayable, seriesDir });
-    const view = toVerifyView(report, savePath);
+    const view = toVerifyView(report);
     reports.push(view);
 
     if (options.cleanEmpty && report.empty && report.presentFiles > 0) {
@@ -321,12 +325,27 @@ export async function runVerifyTask(
     }
   }
 
+  let relocated = 0;
   for (const [index, entry] of inventory.entries()) {
     if (context.signal.aborted) throw new Error('已取消');
     context.step(`核对本地内容 ${index + 1}/${inventory.length}：${entry.name}`, (metas.length + index) / Math.max(1, total));
-    const report = verifyLocal(entry, savePath, { checkPlayable });
-    reports.push(toVerifyView(report, savePath));
+    const report = verifyLocal(entry, savePath, { checkPlayable, seriesDir });
+    reports.push(toVerifyView(report));
+
+    /*
+     * 内容挪过地方就把清单改过来。
+     *
+     * 例子：内容原先在下载根目录，后来归纳进了「番剧」子目录，
+     * 清单里还记着老位置 —— 不修正的话每次核对都得靠兜底查找，
+     * 界面上看到的路径也跟实际对不上。
+     */
+    if (report.dirExists && report.relativePath !== entry.path) {
+      context.note(`修正本地内容位置：${entry.path} → ${report.relativePath}`);
+      entry.path = report.relativePath;
+      relocated += 1;
+    }
   }
+  if (relocated > 0) saveInventory(savePath, allInventory);
 
   const completeCount = reports.filter((item) => item.source === 'torrent' && item.complete).length;
   const emptyCount = reports.filter((item) => item.empty).length;

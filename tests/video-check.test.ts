@@ -239,3 +239,61 @@ describe('looksLikeAppDirectory（把软件放进下载目录时不该被当成�
     expect(looksLikeAppDirectory(dir)).toBe(false);
   });
 });
+
+describe('MP4 的 moov 索引：按顶层 box 找，不靠扫尾部一块', () => {
+  /** 按真实 mp4 的形态造文件：ftyp → free → mdat → moov。 */
+  function makeMp4(path: string, options: { mdatBytes: number; moovBytes: number }): void {
+    const ftyp = Buffer.alloc(28);
+    ftyp.writeUInt32BE(28, 0);
+    ftyp.write('ftyp', 4, 'latin1');
+    ftyp.write('isom', 8, 'latin1');
+
+    const free = Buffer.alloc(8);
+    free.writeUInt32BE(8, 0);
+    free.write('free', 4, 'latin1');
+
+    const mdat = Buffer.alloc(8);
+    mdat.writeUInt32BE(8 + options.mdatBytes, 0);
+    mdat.write('mdat', 4, 'latin1');
+
+    const moovHeader = Buffer.alloc(8);
+    moovHeader.writeUInt32BE(8 + options.moovBytes, 0);
+    moovHeader.write('moov', 4, 'latin1');
+
+    // mdat/moov 的内容要非零，否则会被判成「空壳」而不是「moov 缺失」
+    writeFileSync(path, Buffer.concat([ftyp, free, mdat, Buffer.alloc(options.mdatBytes, 0xab), moovHeader, Buffer.alloc(options.moovBytes, 0xcd)]));
+  }
+
+  it('moov 是最后一个 box 且大于 1MB 时，不该误报「播不了」', () => {
+    const dir = tempDir();
+    const file = join(dir, 'big-moov.mp4');
+    // 真实案例：433MB 的 webrip，moov 有 1.44MB —— 只扫最后 1MB 会扫进 moov 内部，看不到盒头
+    makeMp4(file, { mdatBytes: 6 * 1024 * 1024, moovBytes: 2 * 1024 * 1024 });
+
+    const check = checkVideoFile(file);
+    expect(check.container).toBe('mp4');
+    expect(check.issues).not.toContain('missing-moov');
+    expect(check.playable).toBe(true);
+  });
+
+  it('确实没有 moov 时仍然报错', () => {
+    const dir = tempDir();
+    const file = join(dir, 'no-moov.mp4');
+
+    const ftyp = Buffer.alloc(28);
+    ftyp.writeUInt32BE(28, 0);
+    ftyp.write('ftyp', 4, 'latin1');
+    ftyp.write('isom', 8, 'latin1');
+    const mdat = Buffer.alloc(8);
+    mdat.writeUInt32BE(8 + 1024 * 1024, 0);
+    mdat.write('mdat', 4, 'latin1');
+    // 最后一块是 free（不是 moov），且数据非零
+    const free = Buffer.alloc(8);
+    free.writeUInt32BE(8, 0);
+    free.write('free', 4, 'latin1');
+    writeFileSync(file, Buffer.concat([ftyp, mdat, Buffer.alloc(1024 * 1024, 0xab), free]));
+
+    const check = checkVideoFile(file);
+    expect(check.issues).toContain('missing-moov');
+  });
+});
