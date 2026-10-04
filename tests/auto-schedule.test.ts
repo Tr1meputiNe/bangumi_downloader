@@ -566,3 +566,52 @@ describe('已经下过的集不再占着等待窗口', () => {
     expect(planSchedule([aired], now, options, done).due).toBe(true);
   });
 });
+
+describe('下载前的探活（probeCandidates 现在真的生效）', () => {
+  const candidate = (title: string, magnet: string) => ({
+    result: {
+      title,
+      magnet,
+      sizeBytes: 1024,
+      publishedAt: null,
+      seederCount: null,
+      leecherCount: null,
+      tracker: 'test',
+      provider: 'test'
+    },
+    parsed: { episodes: [1], kind: 'batch', episodeFrom: 1, episodeTo: 13 } as never,
+    score: 50,
+    reasons: [],
+    rejected: false,
+    coversEpisodes: [1]
+  });
+
+  it('按真实做种数重排：低分但有人做种的排到前面', async () => {
+    const { pickViableCandidate } = await import('../src/core/viable.js');
+    const dead = candidate('死种合集', `magnet:?xt=urn:btih:${'a'.repeat(40)}`);
+    const alive = candidate('有人做种的合集', `magnet:?xt=urn:btih:${'b'.repeat(40)}`);
+
+    const pick = await pickViableCandidate([dead, alive], {
+      probeLimit: 5,
+      episodes: [1],
+      // 假探活：不联网。第一条 0 做种，第二条 42 做种
+      probe: async (infoHash) => ({ infoHash, seeders: infoHash.startsWith('b') ? 42 : 0, peers: 1 })
+    });
+
+    expect(pick?.candidate.result.title).toBe('有人做种的合集');
+    expect(pick?.probe.seeders).toBe(42);
+  });
+
+  it('全都探不到做种时，退回偏好最高的那条（不阻塞下载）', async () => {
+    const { pickViableCandidate } = await import('../src/core/viable.js');
+    const first = candidate('第一条', `magnet:?xt=urn:btih:${'c'.repeat(40)}`);
+    const second = candidate('第二条', `magnet:?xt=urn:btih:${'d'.repeat(40)}`);
+
+    const pick = await pickViableCandidate([first, second], {
+      probeLimit: 5,
+      probe: async (infoHash) => ({ infoHash, seeders: 0, peers: 0 })
+    });
+
+    expect(pick?.candidate.result.title).toBe('第一条');
+  });
+});

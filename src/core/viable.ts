@@ -74,6 +74,8 @@ export type PickViableOptions = {
   /** 需要覆盖的集号；给定时优先选覆盖最多的。留空表示只要合集。 */
   episodes?: number[];
   onProbe?: (probe: SeederProbe, candidate: ScoredCandidate) => void;
+  /** 探活实现（默认问公共 tracker）。测试里替换成一个假的不联网版本。 */
+  probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<SeederProbe>;
 };
 
 export type ViablePick = {
@@ -133,7 +135,8 @@ export async function pickViableCandidate(
         // 只有 .torrent 直链时没法 announce，给它一个中性分
         return { candidate, probe: { infoHash: '', seeders: 0, peers: 0 } as SeederProbe };
       }
-      const probe = await probeSeeders(infoHash, {
+      const prober = options.probe ?? probeSeeders;
+      const probe = await prober(infoHash, {
         timeoutMs: options.timeoutMs,
         signal: options.signal
       });

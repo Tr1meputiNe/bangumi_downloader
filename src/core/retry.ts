@@ -48,6 +48,8 @@ export type RetryOptions = {
   refreshCandidates?: () => Promise<readonly ScoredCandidate[]>;
   /** 续传那一份每轮最多先给多久（毫秒）。 */
   resumeSliceMs?: number;
+  /** 探活实现（测试可替换）。 */
+  probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<import('./viable.js').SeederProbe>;
   /** 下载进度回调（透传给界面）。 */
   onProgress?: (info: {
     title: string;
@@ -102,6 +104,7 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
         minThroughput: (options.config.download.minThroughputKBps ?? 30) * 1024,
         maxAttempts: options.config.download.maxAttempts ?? 8,
         resumeSliceMs: options.resumeSliceMs,
+        probe: options.probe,
         onProgress: options.onProgress,
         // 第一轮看有没有历史进度；后面几轮必然要看，因为上一轮就是我们自己下的
         probeExisting: true

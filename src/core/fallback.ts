@@ -6,6 +6,7 @@ import { TorrentDownloader, type DownloadProgress } from '../bittorrent/download
 import { selectFileIndexes, downloadTorrentBytes } from './push.js';
 import { metaFromInfoBytes, parseTorrentFile, type TorrentMeta } from '../bittorrent/metainfo.js';
 import { locateTorrent } from './verify.js';
+import { pickViableCandidate } from './viable.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
@@ -59,6 +60,8 @@ export type FallbackOptions = {
   minResumeGainBytes?: number;
   /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
   configPath?: string;
+  /** 探活实现（默认问公共 tracker，测试可替换）。 */
+  probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<import('./viable.js').SeederProbe>;
   /** 下载过程中的进度回调（界面上的「正在下载」用它）。 */
   onProgress?: (info: {
     title: string;
@@ -98,9 +101,39 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
   const startedAt = Date.now();
 
   const attempts: FallbackResult['attempts'] = [];
-  const ordered = orderCandidates(options.candidates, options.episodes);
+  let ordered = orderCandidates(options.candidates, options.episodes);
 
   if (ordered.length === 0) throw new Error('没有可下载的候选');
+
+  /*
+   * 下载前探活：问一下公共 tracker「这个种子有多少做种」，按真实做种数重排候选。
+   *
+   * 为什么值得：打分高低和「下不下得动」几乎无关（实测做种最多的那条只有 2.7 KB/s）。
+   * 探活比「试跑 75 秒」便宜得多，可以先据此把明显是死种的排到后面。
+   *
+   * 之前这个能力是死代码：`probeCandidates` 这个配置项在界面上能调，
+   * 但没有任何代码读它 —— 用户问「下载前有没有探活」时，答案是「没有」。
+   */
+  const probeLimit = options.config.download.probeCandidates ?? 0;
+  if (probeLimit > 0 && ordered.length > 1) {
+    try {
+      const pick = await pickViableCandidate(ordered, {
+        probeLimit,
+        episodes: options.episodes,
+        timeoutMs: Math.min(options.config.trackers.timeoutMs ?? 15_000, 8_000),
+        signal: options.signal,
+        probe: options.probe
+      });
+      if (pick) {
+        const before = ordered[0]?.result.title.slice(0, 40);
+        const after = pick.candidate.result.title.slice(0, 40);
+        ordered = pick.ranked.map((item) => item.candidate);
+        if (before !== after) log.info(`探活后换了候选：${before} → ${after}`);
+      }
+    } catch (error) {
+      log.warn(`探活失败（${(error as Error).message}），按原顺序试`);
+    }
+  }
 
   let best: FallbackResult | null = null;
   /** 试跑没达标、但确实拿到了数据的候选（全都不达标时用它兜底）。 */

@@ -7,6 +7,7 @@ import { magnetInfoHash } from '../util/magnet.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
+import { probeSeeders } from './viable.js';
 
 const log = logger('dispatch');
 
@@ -141,6 +142,28 @@ async function downloadWithBuiltinClaimed(
 
   const episodes = input.episodes ?? [];
   const infoHash = input.magnet ? magnetInfoHash(input.magnet) : null;
+
+  /*
+   * 探活：先问公共 tracker「这个种子有多少做种」，写进任务日志。
+   *
+   * 手动点「下载」时用户已经选定了这一条，所以探活**不拦**，
+   * 只是把「有没有人做种」提前告诉他 —— 0 做种还要下的话心里有数。
+   */
+  if (infoHash && (config.download.probeCandidates ?? 0) > 0) {
+    try {
+      const probe = await probeSeeders(infoHash, {
+        timeoutMs: Math.min(config.trackers.timeoutMs ?? 15_000, 8_000),
+        signal: hooks.signal
+      });
+      hooks.onLog?.(
+        probe.seeders > 0 || probe.peers > 0
+          ? `探活：公共 tracker 报 ${probe.seeders} 个做种、${probe.peers} 个 peer 地址`
+          : '探活：公共 tracker 没报做种（可能是死种，也可能是 tracker 不认识这个 infohash）—— 仍按你的选择继续'
+      );
+    } catch (error) {
+      hooks.onLog?.(`探活失败（${(error as Error).message}），直接开始下载`);
+    }
+  }
   const timeoutMs = config.trackers.timeoutMs ?? 20_000;
 
   // 优先用 .torrent 直链：省掉 BEP 9 那一步，也更容易在连不上 peer 时拿到文件清单

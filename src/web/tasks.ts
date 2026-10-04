@@ -425,7 +425,16 @@ export async function runAutoTask(
       retryRounds: deps.config.download.retryRounds ?? 6,
       preferPlanner: true,
       // 手动点的按钮就忽略播出计划：用户是明确要看「现在会下什么」
-      force: true
+      force: true,
+      /*
+       * 手动触发也重排计划任务触发器。
+       *
+       * 不这么做的话会出现这种情况：手动跑一轮把某一集下完了 → 计划里那段
+       * 「等着取片源」的窗口被收走 → 但计划任务的触发器没跟着更新，
+       * 于是它继续每 15 分钟空跑一次，直到下一次带 --sync-task 的运行
+       * （实测被用户抓到「每15分钟的那个为什么还在跑」）。
+       */
+      syncTask: process.platform === 'win32'
     });
 
     // runAuto 连不上 Planner 时会自动退回清单；这里照实说明本轮用的是哪一份
