@@ -4,7 +4,8 @@ import { once } from 'node:events';
 import type { AppConfig } from '../config.js';
 import { QbittorrentClient } from '../qbittorrent/client.js';
 import { searchAndRank } from '../core/search.js';
-import { dispatchDownload, resolveBackend } from '../core/dispatch.js';
+import { resolveBackend } from '../core/dispatch.js';
+import { JobQueue } from '../core/jobs.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -22,6 +23,8 @@ const log = logger('web');
  */
 
 export type WebDeps = {
+  /** 下载任务队列。不传时内部自建一个（测试用）。 */
+  jobs?: JobQueue;
   config: AppConfig;
   qbittorrent?: QbittorrentClient;
 };
@@ -63,6 +66,13 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
   }
   if (request.method === 'POST' && path === '/api/add') {
     return handleAdd(deps, request, response);
+  }
+  if (request.method === 'GET' && path === '/api/jobs') {
+    const jobs = ensureJobs(deps).list();
+    return sendJson(response, 200, { jobs: jobs.map(toJobView), running: ensureJobs(deps).running });
+  }
+  if (request.method === 'POST' && path === '/api/jobs/cancel') {
+    return handleCancelJob(deps, request, response);
   }
   if (request.method === 'GET' && path === '/healthz') {
     return sendJson(response, 200, { ok: true });
@@ -165,8 +175,15 @@ async function handleAdd(deps: WebDeps, request: IncomingMessage, response: Serv
   if (items.length === 0) return sendJson(response, 400, { error: '没有要添加的种子' });
   if (items.length > 50) return sendJson(response, 400, { error: '一次最多添加 50 个种子' });
 
-  const results: Array<{ title: string; ok: boolean; error?: string; infoHash?: string; fileCount?: number | null }> = [];
-  for (const raw of items) {
+  /*
+   * 这里只入队，不等下载完成。
+   *
+   * 以前是同步等 dispatchDownload 返回 —— 而下载要试多条候选、可能持续几十分钟，
+   * 于是表现为浏览器一直转圈、没有任何进度、最后客户端超时。
+   * 现在立刻回任务号，前端轮询 /api/jobs 看进度。
+   */
+  const jobs = ensureJobs(deps);
+  const results = items.map((raw) => {
     const title = typeof raw.title === 'string' ? raw.title : '';
     const magnet = typeof raw.magnet === 'string' ? raw.magnet : '';
     const torrentUrl = typeof raw.torrentUrl === 'string' ? raw.torrentUrl : '';
@@ -177,31 +194,56 @@ async function handleAdd(deps: WebDeps, request: IncomingMessage, response: Serv
       : [];
 
     if (title === '' || (magnet === '' && torrentUrl === '')) {
-      results.push({ title: title || '(无标题)', ok: false, error: '缺少标题或下载链接' });
-      continue;
+      return { title: title || '(无标题)', ok: false, error: '缺少标题或下载链接' };
     }
 
-    try {
-      const pushed = await dispatchDownload(
-        { config: deps.config, qbittorrent: deps.qbittorrent },
-        {
-          title,
-          magnet,
-          torrentUrl,
-          sizeBytes,
-          tracker,
-          episodes
-        }
-      );
-      results.push({ title, ok: true, infoHash: pushed.infoHash, fileCount: pushed.fileCount });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.warn(`推送失败：${title.slice(0, 60)} → ${message}`);
-      results.push({ title, ok: false, error: message });
-    }
+    const job = jobs.enqueue({ title, magnet, torrentUrl, sizeBytes, tracker, episodes });
+    log.info(`已入队：${title.slice(0, 60)}（任务 ${job.id}）`);
+    return { title, ok: true, jobId: job.id };
+  });
+
+  sendJson(response, 200, { results, queued: results.filter((item) => item.ok).length });
+}
+
+async function handleCancelJob(deps: WebDeps, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  let body: { id?: unknown };
+  try {
+    body = JSON.parse(await readBody(request)) as { id?: unknown };
+  } catch {
+    return sendJson(response, 400, { error: '请求体不是合法 JSON' });
   }
+  const id = typeof body.id === 'string' ? body.id : '';
+  if (id === '') return sendJson(response, 400, { error: '缺少任务号 id' });
 
-  sendJson(response, 200, { results });
+  const ok = ensureJobs(deps).cancel(id);
+  sendJson(response, ok ? 200 : 404, ok ? { ok: true } : { error: '任务不存在或已经结束' });
+}
+
+/** 任务的对外视图（去掉内部字段，进度换算成百分比）。 */
+function toJobView(job: ReturnType<JobQueue['list']>[number]) {
+  return {
+    id: job.id,
+    title: job.title,
+    status: job.status,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    percent: job.ratio === null ? null : Math.round(job.ratio * 1000) / 10,
+    downloadedBytes: job.downloadedBytes,
+    totalBytes: job.totalBytes,
+    speed: job.speed,
+    peers: job.peers,
+    messages: job.messages.slice(-8),
+    files: job.files,
+    error: job.error,
+    backend: job.backend
+  };
+}
+
+/** 惰性创建队列：测试里可以不传，直接用一个内部实例。 */
+function ensureJobs(deps: WebDeps): JobQueue {
+  deps.jobs ??= new JobQueue({ config: deps.config, qbittorrent: deps.qbittorrent });
+  return deps.jobs;
 }
 
 function readBody(request: IncomingMessage): Promise<string> {

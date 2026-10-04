@@ -1,5 +1,5 @@
 /**
- * Web 界面：搜索资源 → 挑选 → 推送到 qBittorrent。
+ * Web 界面：搜索资源 → 挑选 → 交给后台下载队列。
  *
  * 这是「自动化」之外的第二个入口：自动化负责无人值守地追新番，
  * 这里负责你自己想找点什么的时候手动搜、手动挑。
@@ -8,7 +8,7 @@
 import { render } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { html } from './html.js';
-import { api, type AddResponse, type ResultItem, type SearchResponse, type StatusResponse } from './api.js';
+import { api, type AddResponse, type JobView, type ResultItem, type SearchResponse, type StatusResponse } from './api.js';
 import { formatSize, relativeTime, shortTracker } from './format.js';
 
 const QUALITY_LABELS: Record<string, string> = {
@@ -38,6 +38,8 @@ function App() {
   const [onlyPreferred, setOnlyPreferred] = useState(false);
   const [trackerFilter, setTrackerFilter] = useState('all');
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [jobs, setJobs] = useState<JobView[]>([]);
+  const [jobsRunning, setJobsRunning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -53,6 +55,35 @@ function App() {
     const timer = setTimeout(() => setToast(null), 4000);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  /*
+   * 轮询下载任务。
+   *
+   * 下载是在后台队列里跑的（可能几十分钟），所以界面不能等它，
+   * 得定期问「现在到哪了」。有任务在跑时问得勤一点，闲时慢一点。
+   */
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async (): Promise<void> => {
+      try {
+        const response = await api.jobs();
+        if (!alive) return;
+        setJobs(response.jobs);
+        setJobsRunning(response.running);
+        timer = setTimeout(poll, response.running ? 2000 : 8000);
+      } catch {
+        if (alive) timer = setTimeout(poll, 8000);
+      }
+    };
+
+    void poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   const runSearch = useCallback(async (keyword: string) => {
     const trimmed = keyword.trim();
@@ -123,10 +154,14 @@ function App() {
       );
       const failed = response.results.filter((entry) => !entry.ok);
       if (failed.length === 0) {
-        setToast({ kind: 'ok', text: `已推送 ${response.results.length} 个种子到 qBittorrent` });
+        // 只是入队，下载在后台跑；进度看下面的任务面板
+        setToast({
+          kind: 'ok',
+          text: `已开始下载 ${response.queued ?? response.results.length} 个（进度见下方「下载任务」）`
+        });
         setSelected(new Set());
       } else {
-        setToast({ kind: 'err', text: `${failed.length} 个推送失败：${failed[0]?.error ?? ''}` });
+        setToast({ kind: 'err', text: `${failed.length} 个失败：${failed[0]?.error ?? ''}` });
       }
     } catch (err) {
       setToast({ kind: 'err', text: err instanceof Error ? err.message : String(err) });
@@ -142,7 +177,7 @@ function App() {
           <span class="logo">番</span>
           <div>
             <h1>番剧资源搜索</h1>
-            <p class="sub">搜到的结果可以直接推送到 qBittorrent；无人值守追番仍由 sync / run 负责</p>
+            <p class="sub">勾选后点「开始下载」；下载在后台进行，进度见下方任务面板</p>
           </div>
         </div>
         <div class="status">
@@ -239,13 +274,73 @@ function App() {
           <div class="actions">
             <button type="button" class="ghost" onClick=${() => setSelected(new Set())}>清空</button>
             <button type="button" onClick=${addSelected} disabled=${adding}>
-              ${adding ? '推送中…' : '推送到 qBittorrent'}
+              ${adding ? '提交中…' : '开始下载'}
             </button>
           </div>
         </div>
       `}
 
+      ${jobs.length > 0 &&
+      html`
+        <div class="jobs">
+          <div class="jobs-head">
+            下载任务
+            <span class="dim">${jobsRunning ? '进行中' : '空闲'}</span>
+          </div>
+          ${jobs.slice(0, 8).map((job) => html`<${JobRow} key=${job.id} job=${job} />`)}
+        </div>
+      `}
+
       ${toast && html`<div class=${`toast ${toast.kind}`}>${toast.text}</div>`}
+    </div>
+  `;
+}
+
+const JOB_LABELS: Record<JobView['status'], string> = {
+  queued: '排队中',
+  running: '下载中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消'
+};
+
+/**
+ * 一条下载任务。
+ *
+ * 存在的意义：下载在后台队列里跑（可能几十分钟），
+ * 没有这个面板用户就只能干等，不知道是卡住了还是在正常进行。
+ */
+function JobRow({ job }: { job: JobView }) {
+  const percent = job.percent ?? 0;
+  const detail: string[] = [];
+  if (job.downloadedBytes > 0) {
+    detail.push(
+      job.totalBytes !== null && job.totalBytes > 0
+        ? `${formatSize(job.downloadedBytes)} / ${formatSize(job.totalBytes)}`
+        : formatSize(job.downloadedBytes)
+    );
+  }
+  if (job.speed > 0) detail.push(`${formatSize(job.speed)}/s`);
+  if (job.peers > 0) detail.push(`${job.peers} 个 peer`);
+
+  return html`
+    <div class=${`job ${job.status}`}>
+      <div class="job-line">
+        <span class=${`job-status ${job.status}`}>${JOB_LABELS[job.status]}</span>
+        <span class="job-title" title=${job.title}>${job.title}</span>
+        ${job.percent !== null &&
+        job.status === 'running' &&
+        html`<span class="job-percent">${percent.toFixed(1)}%</span>`}
+      </div>
+      ${job.status === 'running' &&
+      html`
+        <div class="job-bar"><div class="job-bar-fill" style=${`width:${Math.max(percent, 1)}%`}></div></div>
+      `}
+      ${detail.length > 0 && html`<div class="job-detail dim">${detail.join(' · ')}</div>`}
+      ${job.error && html`<div class="job-error">${job.error}</div>`}
+      ${job.status === 'completed' &&
+      job.files.length > 0 &&
+      html`<div class="job-detail dim">落盘 ${job.files.length} 个文件</div>`}
     </div>
   `;
 }

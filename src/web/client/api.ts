@@ -47,7 +47,33 @@ export type SearchResponse = {
 };
 
 export type AddResponse = {
-  results: Array<{ title: string; ok: boolean; error?: string; infoHash?: string }>;
+  results: Array<{ title: string; ok: boolean; error?: string; infoHash?: string; jobId?: string }>;
+  /** 本次入队的任务数。下载在后台跑，不阻塞这个响应。 */
+  queued?: number;
+};
+
+export type JobView = {
+  id: string;
+  title: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** 完成百分比（0~100），未知时 null。 */
+  percent: number | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  speed: number;
+  peers: number;
+  messages: string[];
+  files: string[];
+  error: string | null;
+  backend: string;
+};
+
+export type JobsResponse = {
+  jobs: JobView[];
+  running: boolean;
 };
 
 export type StatusResponse = {
@@ -87,5 +113,8 @@ export const api = {
   status: () => request<StatusResponse>('/api/status'),
   search: (query: string) => request<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
   add: (items: unknown[]) =>
-    request<AddResponse>('/api/add', { method: 'POST', body: JSON.stringify({ items }) })
+    request<AddResponse>('/api/add', { method: 'POST', body: JSON.stringify({ items }) }),
+  jobs: () => request<JobsResponse>('/api/jobs'),
+  cancelJob: (id: string) =>
+    request<{ ok: boolean }>('/api/jobs/cancel', { method: 'POST', body: JSON.stringify({ id }) })
 };

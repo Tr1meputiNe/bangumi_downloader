@@ -6,6 +6,7 @@ import { SearchCache } from '../src/util/cache.js';
 import { selectFileIndexes } from '../src/core/push.js';
 import { toDisplayResult } from '../src/web/serialize.js';
 import { rankCandidates } from '../src/anime/rank.js';
+import { JobQueue } from '../src/core/jobs.js';
 import type { SearchResult } from '../src/anime/rank.js';
 
 function result(overrides: Partial<SearchResult> & { title: string }): SearchResult {
@@ -264,5 +265,66 @@ describe('selectFileIndexes（push 模块）', () => {
       { index: 2, path: 'Frieren/fonts.zip' }
     ];
     expect(selectFileIndexes(files, [1]).indexes).toEqual([0]);
+  });
+});
+
+describe('下载任务队列（/api/add 不再阻塞等待）', () => {
+  let started: StartedServer;
+
+  beforeAll(async () => {
+    const config = defaultConfig();
+    config.web = { ...config.web, port: 0, host: '127.0.0.1', openBrowser: false };
+    config.download = { ...config.download, backend: 'builtin', savePath: '/tmp/dsh-jobs-test' };
+    // 显式给一个队列实例，方便断言任务确实进了队列
+    started = await startWebServer({ config, qbittorrent: undefined, jobs: new JobQueue({ config }) });
+  });
+
+  afterAll(async () => {
+    await started?.close();
+  });
+
+  it('入队后立刻返回任务号，而不是等到下载结束', async () => {
+    const begin = Date.now();
+    const response = await fetch(`${started.url}api/add`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        items: [
+          {
+            title: '任务队列测试',
+            // 故意用无效 infohash：下载必然找不到 peer，但**入队必须立刻返回**
+            magnet: `magnet:?xt=urn:btih:${'0'.repeat(40)}&dn=x`
+          }
+        ]
+      })
+    });
+    const elapsed = Date.now() - begin;
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { results: Array<{ ok: boolean; jobId?: string }>; queued?: number };
+    expect(body.queued).toBe(1);
+    expect(body.results[0]?.ok).toBe(true);
+    expect(body.results[0]?.jobId).toBeTruthy();
+    // 关键：必须立刻返回。以前这里会同步等下载完成，几十分钟都有可能
+    expect(elapsed).toBeLessThan(3000);
+
+    const jobs = (await (await fetch(`${started.url}api/jobs`)).json()) as {
+      jobs: Array<{ id: string; status: string }>;
+    };
+    expect(jobs.jobs.some((job) => job.id === body.results[0]?.jobId)).toBe(true);
+  });
+
+  it('/api/jobs 返回前端画进度条需要的字段', async () => {
+    const response = await fetch(`${started.url}api/jobs`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { jobs: Array<Record<string, unknown>>; running: boolean };
+    expect(typeof body.running).toBe('boolean');
+    expect(Array.isArray(body.jobs)).toBe(true);
+    const job = body.jobs[0];
+    if (job) {
+      for (const field of ['id', 'title', 'status', 'percent', 'downloadedBytes', 'messages']) {
+        expect(job).toHaveProperty(field);
+      }
+    }
   });
 });

@@ -37,6 +37,20 @@ export type DispatchResult = PushResult & {
 export type DispatchDeps = {
   config: AppConfig;
   qbittorrent?: QbittorrentClient;
+  /**
+   * 进度与日志钩子。
+   *
+   * Web 界面把下载放到后台队列里跑，需要实时把进度反映到任务上，
+   * 否则用户点了「下载」只能干等，看不到任何反馈。
+   */
+  onLog?: (message: string) => void;
+  onProgress?: (progress: {
+    ratio: number;
+    downloadedBytes: number;
+    totalBytes: number;
+    speed: number;
+    peers: number;
+  }) => void;
 };
 
 export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Promise<DispatchResult> {
@@ -46,7 +60,7 @@ export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Pr
     const result = await pushRelease(deps.qbittorrent, deps.config, input);
     return { ...result, backend };
   }
-  return await downloadWithBuiltin(deps.config, input);
+  return await downloadWithBuiltin(deps.config, input, { onLog: deps.onLog, onProgress: deps.onProgress });
 }
 
 /**
@@ -56,7 +70,11 @@ export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Pr
  * 引擎只会分配并写入这些文件 —— 合集的其余部分完全不落盘。
  * 只有磁力链接时，引擎先通过 BEP 9 取元数据，拿到清单后再选文件。
  */
-export async function downloadWithBuiltin(config: AppConfig, input: PushInput): Promise<DispatchResult> {
+export async function downloadWithBuiltin(
+  config: AppConfig,
+  input: PushInput,
+  hooks: { onLog?: (message: string) => void; onProgress?: DispatchDeps['onProgress'] } = {}
+): Promise<DispatchResult> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
     throw new Error('内置下载后端需要配置 download.savePath（下载到哪个目录）');
@@ -96,8 +114,18 @@ export async function downloadWithBuiltin(config: AppConfig, input: PushInput): 
     selectedFiles,
     timeoutMs: config.download.timeoutMs ?? 60 * 60_000,
     stallTimeoutMs: config.download.stallTimeoutMs ?? 180_000,
-    onLog: (message) => log.info(message),
+    onLog: (message) => {
+      log.info(message);
+      hooks.onLog?.(message);
+    },
     onProgress: (progress) => {
+      hooks.onProgress?.({
+        ratio: progress.ratio,
+        downloadedBytes: progress.downloadedBytes,
+        totalBytes: progress.totalBytes,
+        speed: progress.speed,
+        peers: progress.peers
+      });
       if (progress.ratio >= 1) return;
       log.debug(
         `进度 ${(progress.ratio * 100).toFixed(1)}%（${formatSize(progress.downloadedBytes)}/${formatSize(

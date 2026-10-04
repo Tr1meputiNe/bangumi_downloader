@@ -510,3 +510,91 @@ button.ghost:hover:not(:disabled) {
     gap: 12px;
   }
 }
+
+/* ---------------------------------------------------------------- 下载任务面板 */
+
+.jobs {
+  margin: 16px 0 8px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--panel, rgba(255, 255, 255, 0.02));
+}
+
+.jobs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.job {
+  padding: 8px 0;
+  border-top: 1px solid var(--border, #2a2f3a);
+}
+
+.job:first-of-type {
+  border-top: none;
+}
+
+.job-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-status {
+  flex: none;
+  font-size: 12px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.job-status.running { background: rgba(80, 160, 255, 0.18); color: #7fb6ff; }
+.job-status.completed { background: rgba(70, 200, 130, 0.18); color: #63d69b; }
+.job-status.failed { background: rgba(255, 100, 100, 0.18); color: #ff8b8b; }
+.job-status.cancelled { background: rgba(255, 255, 255, 0.08); color: #9aa3b2; }
+
+.job-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-percent {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: #7fb6ff;
+}
+
+.job-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.job-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4a8cff, #7fb6ff);
+  transition: width 0.4s ease;
+}
+
+.job-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #ff8b8b;
+  word-break: break-all;
+}
