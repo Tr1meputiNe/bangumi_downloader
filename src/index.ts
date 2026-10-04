@@ -51,6 +51,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --retry <轮数>      download/auto 最多重试几轮（每轮从磁盘进度继续），默认取配置
   --no-retry          只跑一轮，不自动重试
   --clean-empty       verify 时把「一个有效分片都没有」的空壳目录删掉
+  --add-local         verify 时把下载目录里没记录过的内容（例如自己用别的工具下的）加进本地清单
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -427,7 +428,7 @@ async function cmdDownload(config: AppConfig, configPath: string, options: Downl
  */
 async function cmdVerify(
   config: AppConfig,
-  options: { infoHash?: string; cleanEmpty: boolean }
+  options: { infoHash?: string; cleanEmpty: boolean; addLocal: boolean }
 ): Promise<number> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
@@ -436,7 +437,12 @@ async function cmdVerify(
   }
 
   log.info(`核对目录：${savePath}`);
-  const result = await verifyAll({ savePath, infoHash: options.infoHash, cleanEmpty: options.cleanEmpty });
+  const result = await verifyAll({
+    savePath,
+    infoHash: options.infoHash,
+    cleanEmpty: options.cleanEmpty,
+    addLocal: options.addLocal
+  });
 
   if (result.reports.length === 0) {
     log.warn('没有可核对的记录（元数据缓存是空的）。先跑一次 download 或 auto 再来。');
@@ -445,9 +451,18 @@ async function cmdVerify(
 
   for (const report of result.reports) printVerifyReport(report);
 
-  const done = result.reports.filter((report) => report.complete).length;
-  const empty = result.reports.filter((report) => report.empty).length;
-  log.info(`共 ${result.reports.length} 个种子：已下完 ${done} 个，空壳 ${empty} 个`);
+  if (result.added.length > 0) {
+    log.info(`新加入本地清单 ${result.added.length} 项（这些不是本项目下的，只列体积不做校验）`);
+  }
+
+  const torrents = result.reports.filter((report) => report.source === 'torrent');
+  const locals = result.reports.filter((report) => report.source === 'local');
+  const done = torrents.filter((report) => report.complete).length;
+  const empty = torrents.filter((report) => report.empty).length;
+  log.info(
+    `共 ${result.reports.length} 项：本项目下载 ${torrents.length} 个（已下完 ${done}，空壳 ${empty}）` +
+      `｜本地内容 ${locals.length} 个`
+  );
 
   if (result.removed.length > 0) {
     log.info(`已清理 ${result.removed.length} 个空壳目录，下次运行会重新下载`);
@@ -717,6 +732,7 @@ export async function main(argv: string[]): Promise<number> {
       retry: { type: 'string' },
       'no-retry': { type: 'boolean', default: false },
       'clean-empty': { type: 'boolean', default: false },
+      'add-local': { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -780,7 +796,8 @@ export async function main(argv: string[]): Promise<number> {
     case 'verify':
       return cmdVerify(config, {
         infoHash: values.query ?? positionals[1],
-        cleanEmpty: values['clean-empty']
+        cleanEmpty: values['clean-empty'],
+        addLocal: values['add-local']
       });
     case 'auto':
       return cmdAuto(config, configPath, {

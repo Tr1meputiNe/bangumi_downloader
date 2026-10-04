@@ -29,7 +29,7 @@
 {
   "download": {
     "backend": "builtin",        // 用自带的 BT 引擎，不依赖 qBittorrent
-    "savePath": "D:/download",   // 番剧下到这里
+    "savePath": "D:/anime_download",   // 番剧下到这里
     "trialSeconds": 75,          // 每条候选试跑多久来判断速度
     "minThroughputKBps": 30,     // 低于这个速度就换下一条候选
     "maxAttempts": 10,           // 最多试几条
@@ -91,6 +91,22 @@
 - `startFrom`：可选，从第几集开始追
 - `enabled: false`：可选，临时跳过这一条
 
+### 下载目录里还有什么
+
+`D:\anime_download` 里除了本项目下的内容，还可能放着你用别的工具下的片子。
+`verify` 会把两类都列出来，用符号区分：
+
+- `✅` 本项目下载、**分片哈希逐片校验通过**
+- `📁` 本地内容（无种子元数据，只报体积和文件数，不声称完整）
+- `⚠️` / `⬜` 本项目下载但只下了一半 / 完全是空壳
+
+第一次遇到本地内容时用一次 `--add-local`，之后它就会被记进
+`D:\anime_download\.bangumi-meta\inventory.json`，以后 `verify` 都会带上它：
+
+```bat
+bangumi-downloader.exe verify --add-local
+```
+
 ### 手动触发 / 观察
 
 ```bat
@@ -128,9 +144,9 @@ Get-ScheduledTaskInfo -TaskName BangumiDownloader
 
 **Q：想确认到底下了多少**
 
-看命令行窗口里的 `已完成分片 N/M` 和 `累计收到 block`。
-注意**不要用文件大小判断进度** —— 程序会预先分配文件到完整长度（为了断点续传），
-所以没下完的文件看起来也是满的。
+用 `verify`，不要看文件大小 —— 程序会预先分配文件到完整长度（为了断点续传），
+所以没下完的文件看起来也是满的。实测踩过：13 个看着齐整的 700MB mkv，
+分片哈希一验只有前几个分片是真的，播放器打开即报错。
 
 **Q：想看每个 peer 到底卡在哪**
 
