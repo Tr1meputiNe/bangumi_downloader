@@ -65,7 +65,15 @@ export function formatInterval(raw: string | null | undefined): string | null {
   return `每 ${total} 分钟`;
 }
 
-/** 把计划任务的退出码翻译成人话。 */
+/**
+ * 把计划任务的退出码翻译成人话。
+ *
+ * 这里必须把「上一次还在跑，所以这次的触发被拒」单独说清楚：
+ * 追番是长任务（一轮可能跑几小时），而触发器在播出窗口里每 15 分钟就来一次，
+ * 于是任务计划程序会返回 0x800710E0。这是**完全正常**的（MultipleInstances=IgnoreNew
+ * 就是为此设的），但界面上直接显示「异常退出」会让人以为坏了 ——
+ * 实测就是这么被误会的。
+ */
 export function describeResult(code: number | null): string {
   if (code === null) return '未知';
   switch (code) {
@@ -79,6 +87,9 @@ export function describeResult(code: number | null): string {
       return '被用户中止（0x41306）';
     case 0x80070420:
       return '任务已被删除（0x80070420）';
+    case 0x800710e0:
+      // ERROR_REQUEST_REFUSED：上一轮还在跑，这次触发被跳过
+      return '上一轮还在跑，这次触发跳过（正常）';
     default:
       return code > 0x40000000 ? `异常退出（0x${code.toString(16).toUpperCase()}）` : `退出码 ${code}`;
   }

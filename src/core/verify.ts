@@ -128,7 +128,12 @@ export type TorrentLocation = {
   singleFileDir?: string;
 };
 
-export function locateTorrent(meta: TorrentMeta, savePath: string, seriesDir?: string): TorrentLocation {
+export function locateTorrent(
+  // 只依赖这几个字段，好让「只知道文件名」的调用方（例如 fallback 里的定位）也能用
+  meta: Pick<TorrentMeta, 'name' | 'singleFile'> & { files: ReadonlyArray<{ path: string }> },
+  savePath: string,
+  seriesDir?: string
+): TorrentLocation {
   const seriesRoot = seriesDir?.trim() || '';
   const nestedRoot = seriesRoot === '' ? null : join(savePath, sanitize(seriesRoot));
   const folderName = sanitize(meta.name);

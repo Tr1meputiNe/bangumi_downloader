@@ -229,3 +229,17 @@ describe('追番清单：进度编辑', () => {
     expect(loadWatchlist(path).entries.map((entry) => entry.query)).toEqual(['B 番']);
   });
 });
+
+describe('计划任务退出码：不要把人吓一跳', () => {
+  it('「上一轮还在跑」是正常情况，不能说成异常退出', () => {
+    // 0x800710E0 = ERROR_REQUEST_REFUSED：MultipleInstances=IgnoreNew 拒了这次触发
+    const text = describeResult(0x800710e0);
+    expect(text).toContain('还在跑');
+    expect(text).toContain('正常');
+    expect(text).not.toContain('异常');
+  });
+
+  it('真正的异常仍然报异常', () => {
+    expect(describeResult(0x80070005)).toContain('异常退出');
+  });
+});

@@ -244,8 +244,10 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     idleIntervalMinutes: 180,
     releaseWindowHours: 12,
     retryRounds: 6,
-    retryBackoffMinutes: 10,
-    retryMaxBackoffMinutes: 120,
+    // 退避别拉太长：每轮都会重新搜一遍候选（新版本往往是后来才出的），
+    // 4 小时的任务窗口里多试几轮，比死等一条不动的种子强。
+    retryBackoffMinutes: 5,
+    retryMaxBackoffMinutes: 30,
     // 单部番单轮处理几集。默认不限制：内置引擎是按种子下载的，
     // 把它切小只会让「一整季」被拆成很多轮，反而更慢。
     maxEpisodesPerSubjectPerRun: 999,

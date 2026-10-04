@@ -472,7 +472,25 @@ async function downloadForGap(gap: AnimeGap, options: {
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,
-    onLog: (message) => log.debug(message)
+    onLog: (message) => log.debug(message),
+    /*
+     * 每轮开始前重新搜一遍。
+     *
+     * 这是「新番刚播完」场景的关键：那时片源站上往往只有一两条候选，
+     * 而且可能是几乎没种的 raw；字幕组版本要晚几个小时才出、做种多得多。
+     * 不重新搜的话，六轮重试都在捧同一份列表，好版本永远轮不到。
+     */
+    refreshCandidates: async () => {
+      const again = await searchAndRank({
+        query: gap.queries[0] ?? name,
+        altQuery: gap.queries[1],
+        config,
+        mode: 'automation',
+        targets: targets.filter((target) => wanted.includes(target.episode)),
+        targetSeason: gap.season
+      });
+      return again.ranked;
+    }
   });
 
   // 只有真下完了才记「别再下了」：下到一半的下一轮还要继续
@@ -678,7 +696,9 @@ async function runForEntry(
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,
-    onLog: (message) => log.debug(message)
+    onLog: (message) => log.debug(message),
+    // 每轮重新搜一遍：第一轮那批候选可能只有一两条，而且未必下得动
+    refreshCandidates: async () => (await searchAndRank({ query: entry.query, config, mode: 'manual' })).ranked
   });
 
   /*

@@ -280,3 +280,34 @@ describe('核对：清理空壳', () => {
     expect(halfReport?.complete).toBe(false);
   });
 });
+
+describe('自动下载的落盘位置（和网页那条路必须一致）', () => {
+  it('引擎拿到 seriesRoot/singleFileDir 时，单文件种子会进番剧目录', async () => {
+    // 这一段是回归测试：fallback（自动追番走的路）以前没把「番剧子目录」
+    // 传给引擎，于是自动下的内容散在下载根目录里，而「片库」页只扫番剧子目录
+    // —— 下好了却在界面上看不见，看起来就像「没下载」。
+    const { TorrentStorage } = await import('../src/bittorrent/storage.js');
+    const { metaFromInfoBytes } = await import('../src/bittorrent/metainfo.js');
+    const { createHash } = await import('node:crypto');
+
+    const root = mkdtempSync(join(tmpdir(), 'layout-'));
+    roots.push(root);
+
+    const content = Buffer.alloc(PIECE, 7);
+    const infoBytes = bencode({
+      name: '[Group] Show - 13 [1080p].mkv',
+      'piece length': PIECE,
+      pieces: createHash('sha1').update(content).digest(),
+      length: content.length
+    });
+    const meta = metaFromInfoBytes(new Uint8Array(infoBytes));
+    expect(meta?.singleFile).toBe(true);
+
+    // 和 dispatch.ts 传的一样：seriesRoot = 番剧，singleFileDir = 发布标题
+    const storage = new TorrentStorage(meta!, { savePath: root, seriesRoot: '番剧', singleFileDir: '[Group] Show - 13 [1080p][简繁]' });
+    const target = join(root, '番剧', '[Group] Show - 13 [1080p][简繁]', '[Group] Show - 13 [1080p].mkv');
+    const entry = storage.files[0];
+    expect(entry?.absolutePath).toBe(target);
+    storage.close();
+  });
+});

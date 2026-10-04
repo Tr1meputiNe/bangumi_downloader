@@ -4,8 +4,8 @@ import type { AppConfig } from '../config.js';
 import type { ScoredCandidate } from '../anime/rank.js';
 import { TorrentDownloader, type DownloadProgress } from '../bittorrent/downloader.js';
 import { selectFileIndexes, downloadTorrentBytes } from './push.js';
-import { metaFromInfoBytes, parseTorrentFile } from '../bittorrent/metainfo.js';
-import { sanitizeSegment } from '../bittorrent/storage.js';
+import { metaFromInfoBytes, parseTorrentFile, type TorrentMeta } from '../bittorrent/metainfo.js';
+import { locateTorrent } from './verify.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 
@@ -43,6 +43,14 @@ export type FallbackOptions = {
    * 有进度的直接续传，不再浪费一个试跑窗口重新测速。
    */
   probeExisting?: boolean;
+  /**
+   * 续传那一份最多先给多久（毫秒，默认 15 分钟）。
+   *
+   * 为什么要有上限：磁盘上那份进度可能是**死种**留下的。
+   * 之前续传会一口气吃掉整个时间预算（几小时），期间新发布的、
+   * 做种多得多的字幕组版本根本没机会被试到。
+   */
+  resumeSliceMs?: number;
 };
 
 export type FallbackResult = {
@@ -78,6 +86,7 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
 
   let best: FallbackResult | null = null;
   const resumedTotal = 0;
+  // （续传结果在下面 probeExisting 之后拿到）
 
   /*
    * 先看看有没有「上次下了一半」的候选。
@@ -86,13 +95,29 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
    * 如果这一轮还傻乎乎地从第一条重新试跑，就永远在原地打转，
    * 每次都要人来判断「其实该接着上次那条下」。
    */
+  /*
+   * 先试「上次下了一半」的那条，但只给一段有界的时间。
+   *
+   * 为什么不是直接返回它：磁盘上那份进度可能是死种留下的，
+   * 而这段时间里片源站可能已经出了做种多得多的版本（字幕组一般晚几个小时）。
+   * 之前一口气把整个预算都给了续传，新版本根本没机会被试到 ——
+   * 表现就是「一直在下、速度几十 KB/s、几个小时下不完」。
+   */
+  let resumed: FallbackResult | null = null;
   if (options.probeExisting !== false) {
-    const resumed = await resumeExisting(ordered, options);
-    if (resumed) return resumed;
+    resumed = await resumeExisting(ordered, options);
+    if (resumed?.completed) return resumed;
+  }
+  const resumedInfoHash = resumed?.infoHash ?? null;
+  if (resumed) {
+    log.info(`    续传这一轮拿到 ${formatSize(resumed.bytesWritten)}，继续看有没有更好的候选`);
+    best = resumed;
   }
 
   for (const [index, candidate] of ordered.slice(0, maxAttempts).entries()) {
     if (options.signal?.aborted) break;
+    // 续传阶段已经试过这条了，别浪费第二个窗口
+    if (resumedInfoHash !== null && candidate.result.magnet.includes(resumedInfoHash)) continue;
     const remaining = budgetMs - (Date.now() - startedAt);
     if (remaining < 30_000) {
       log.warn('整体时间预算已用完，停止继续尝试');
@@ -127,7 +152,7 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
       return {
         infoHash: trial.infoHash,
         title: candidate.result.title,
-        files: collectFiles(trial.savePath),
+        files: filesOf(trial),
         bytesWritten: trial.bytesWritten,
         completed: true,
         resumedBytes: resumedTotal,
@@ -154,7 +179,7 @@ export async function downloadWithFallback(options: FallbackOptions): Promise<Fa
       const result: FallbackResult = {
         infoHash: finish.infoHash,
         title: candidate.result.title,
-        files: collectFiles(finish.savePath),
+        files: filesOf(finish),
         bytesWritten: finish.bytesWritten,
         completed: finish.completed,
         resumedBytes: resumedTotal,
@@ -216,12 +241,15 @@ async function resumeExisting(
       `磁盘上已有 ${formatSize(bestBytes)}，直接续传`
   );
 
-  const remaining = Math.max(60_000, (options.budgetMs ?? 6 * 60 * 60_000));
+  const budget = Math.max(60_000, options.budgetMs ?? 6 * 60 * 60_000);
+  // 续传先给一段有界的时间（默认 15 分钟）：够它把「有速度」证明出来，
+  // 又不至于把整个预算吃光、让后面新发布的候选完全没机会。
+  const slice = Math.max(60_000, Math.min(budget, options.resumeSliceMs ?? RESUME_SLICE_MS));
   const outcome = await runAttempt(bestCandidate, {
     ...options,
-    trialSeconds: Math.floor(remaining / 1000),
-    remainingMs: remaining,
-    // 续传时跳过热身性质的试跑判断，直接给它完整预算
+    trialSeconds: Math.floor(slice / 1000),
+    remainingMs: slice,
+    // 续传时跳过热身性质的试跑判断，直接把这段时间给它
     resume: true
   });
 
@@ -255,10 +283,15 @@ async function existingBytesFor(candidate: ScoredCandidate, options: FallbackOpt
     const meta = await metadataFor(candidate, options);
     if (!meta) return 0;
 
-    const dir = join(options.savePath, sanitizeSegment(meta.name));
-    if (!existsSync(dir)) return 0;
+    /*
+     * 用和核对功能同一套定位规则（locateTorrent），别自己拼路径。
+     * 之前这里只认 savePath/种子名，于是内容归纳进「番剧」子目录之后，
+     * 明明下过一半的种子会被判成「磁盘上没有数据」，每次都从零试跑。
+     */
+    const location = locateTorrent(meta, options.savePath, options.config.download.seriesDir);
+    if (!location.exists) return 0;
 
-    return nonPaddingBytes(dir);
+    return nonPaddingBytes(location.dir);
   } catch {
     return 0;
   }
@@ -275,7 +308,7 @@ async function existingBytesFor(candidate: ScoredCandidate, options: FallbackOpt
 async function metadataFor(
   candidate: ScoredCandidate,
   options: FallbackOptions
-): Promise<{ name: string } | null> {
+): Promise<TorrentMeta | null> {
   const cacheDir = metadataCacheDir(options);
 
   const magnet = candidate.result.magnet;
@@ -335,6 +368,8 @@ type AttemptOutcome = {
   bytesWritten: number;
   throughput: number;
   reason: string;
+  /** 引擎报的落盘文件（绝对路径）。 */
+  files: string[];
   savePath: string;
 };
 
@@ -367,6 +402,14 @@ async function runAttempt(
     magnet: candidate.result.magnet || undefined,
     torrentFile,
     savePath: options.savePath,
+    /*
+     * 目录归纳规则必须和 dispatch（网页那条路）保持一致：
+     * 番剧统一放进 savePath/seriesDir，单文件种子用发布名当文件夹名。
+     * 这里以前漏了这两项，结果自动化下的内容散在下载根目录里，
+     * 而「片库」页只扫番剧子目录 —— 下好了却在界面上看不见。
+     */
+    seriesRoot: options.config.download.seriesDir?.trim() || undefined,
+    singleFileDir: candidate.result.title,
     selectedFiles,
     timeoutMs: seconds * 1000,
     // 试跑阶段不要因为「暂时没进度」提前退出，让它把观察窗口跑满
@@ -383,20 +426,24 @@ async function runAttempt(
   const startedAt = Date.now();
   let reason = '试跑时间到';
   let completed = false;
+  let files: string[] = [];
 
   /*
    * 续传时的「有没有在动」看门狗。
    *
    * 死种的典型表现是：磁盘上有历史数据，连上去之后一个字节都拿不到。
    * 没有这个看门狗就会白等满整个时间预算（几小时），而其实早该换下一条了。
+   *
+   * 判据用**引擎自己报的已校验字节数**，不再去数文件系统 ——
+   * 之前数的是整个下载根目录的增量，别的下载、甚至别的番的进度都会被算进来，
+   * 而且加了「番剧子目录」之后那个路径本来就不对了。
    */
-  const baseline = options.resume ? nonPaddingBytes(options.savePath) : 0;
   let lastGainAt = Date.now();
-  let lastSeen = baseline;
+  let lastSeen = 0;
   let stalled = false;
   const stallGuard = options.resume
     ? setInterval(() => {
-        const now = nonPaddingBytes(options.savePath);
+        const now = latestDownloaded ?? 0;
         if (now > lastSeen + 256 * 1024) {
           // 每涨 256KB 才算「在动」，避免把零星的几个 block 当成有进展
           lastSeen = now;
@@ -412,6 +459,7 @@ async function runAttempt(
   try {
     const outcome = await downloader.download();
     bytes = outcome.bytesWritten;
+    files = outcome.files;
     completed = true;
     reason = '完整下载完成';
   } catch (error) {
@@ -440,12 +488,17 @@ async function runAttempt(
     bytesWritten: finalBytes,
     throughput: finalBytes / elapsed,
     reason,
+    // 落盘文件用引擎报的清单；它没给（例如失败在取元数据阶段）就退回整目录扫描
+    files: files.length > 0 ? files : [],
     savePath: options.savePath
   };
 }
 
 /** 续传时多久没有新增数据就判定这条已经死了。 */
 const RESUME_STALL_MS = 150_000;
+
+/** 续传那一份最多先给多久，然后就去试别的候选。 */
+const RESUME_SLICE_MS = 15 * 60_000;
 
 /**
  * 目录里所有文件「名义长度」之和。
@@ -543,6 +596,17 @@ export function orderCandidates(candidates: readonly ScoredCandidate[], episodes
     if (episodeDiff !== 0) return episodeDiff;
     return b.score - a.score;
   });
+}
+
+/**
+ * 这一轮落了哪些文件。
+ *
+ * 优先用引擎报的清单；拿不到时才退回扫描目录（老实现是直接扫整个下载根目录，
+ * 于是「落盘文件」里会列出所有番剧的文件 —— 报告完全不可信）。
+ */
+function filesOf(outcome: AttemptOutcome): string[] {
+  if (outcome.files.length > 0) return outcome.files;
+  return collectFiles(outcome.savePath);
 }
 
 function collectFiles(path: string): string[] {

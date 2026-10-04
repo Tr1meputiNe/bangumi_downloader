@@ -35,6 +35,17 @@ export type RetryOptions = {
   minProgressBytes?: number;
   /** 每轮的时间预算，覆盖配置里的 budgetMinutes。 */
   roundBudgetMs?: number;
+  /**
+   * 每轮开始前重新取一次候选。
+   *
+   * 为什么必须有：新番刚播完时片源站往往只有一两条（还可能是死种），
+   * 而字幕组版本要晚几个小时才出、做种也多得多。原来六轮重试都捧着
+   * 首轮那一份候选列表，等于把「后来出现的好版本」全部错过 ——
+   * 实测就是这样：一条几十 KB/s 的下了一下午。
+   */
+  refreshCandidates?: () => Promise<readonly ScoredCandidate[]>;
+  /** 续传那一份每轮最多先给多久（毫秒）。 */
+  resumeSliceMs?: number;
 };
 
 export type RetryResult = FallbackResult & {
@@ -52,15 +63,22 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
   const history: RetryResult['history'] = [];
   let previousBytes = 0;
   let last: FallbackResult | null = null;
+  let candidates = options.candidates;
 
   for (let round = 1; round <= rounds; round += 1) {
     if (options.signal?.aborted) break;
 
-    log.info(`第 ${round}/${rounds} 轮开始${round > 1 ? `（累计已下 ${formatSize(previousBytes)}）` : ''}`);
+    // 第二轮起重新搜一遍：新发布的版本通常比首轮那批好得多
+    if (round > 1 && options.refreshCandidates) {
+      const fresh = await refreshCandidates(options.refreshCandidates, candidates);
+      if (fresh.length > 0) candidates = fresh;
+    }
+
+    log.info(`第 ${round}/${rounds} 轮开始${round > 1 ? `（累计已下 ${formatSize(previousBytes)}，候选 ${candidates.length} 条）` : ''}`);
 
     try {
       last = await downloadWithFallback({
-        candidates: options.candidates,
+        candidates,
         config: options.config,
         episodes: options.episodes,
         savePath: options.savePath,
@@ -70,6 +88,7 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
         trialSeconds: options.config.download.trialSeconds ?? 90,
         minThroughput: (options.config.download.minThroughputKBps ?? 30) * 1024,
         maxAttempts: options.config.download.maxAttempts ?? 8,
+        resumeSliceMs: options.resumeSliceMs,
         // 第一轮看有没有历史进度；后面几轮必然要看，因为上一轮就是我们自己下的
         probeExisting: true
       });
@@ -133,6 +152,46 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
       '下次运行会从这个进度继续（不会重下）。'
   );
   return finalResult;
+}
+
+/**
+ * 把新搜到的候选合到列表前面。
+ *
+ * 新候选优先：它们更新、通常做种更多。旧的留在后面兜底 ——
+ * 万一磁盘上那份进度对应的种子已经下架（搜不到了），还得靠它续传。
+ */
+async function refreshCandidates(
+  loader: () => Promise<readonly ScoredCandidate[]>,
+  current: readonly ScoredCandidate[]
+): Promise<readonly ScoredCandidate[]> {
+  try {
+    const fresh = await loader();
+    if (fresh.length === 0) {
+      log.info('重新搜索没有新结果，沿用上一轮的候选');
+      return current;
+    }
+
+    const seen = new Set(fresh.map(keyOf));
+    const kept = current.filter((item) => !seen.has(keyOf(item)));
+    const added = fresh.filter((item) => !current.some((old) => keyOf(old) === keyOf(item)));
+
+    if (added.length > 0) {
+      log.info(`重新搜索到 ${fresh.length} 条候选，其中 ${added.length} 条是上一轮没有的，本轮优先试新的`);
+    } else {
+      log.info(`重新搜索到 ${fresh.length} 条候选（没有新增），顺序按最新结果`);
+    }
+    return [...fresh, ...kept];
+  } catch (error) {
+    log.warn(`重新搜索失败（${error instanceof Error ? error.message : String(error)}），沿用上一轮的候选`);
+    return current;
+  }
+}
+
+/** 候选的稳定标识：优先 infohash，拿不到就用标题。 */
+function keyOf(candidate: ScoredCandidate): string {
+  const magnet = candidate.result.magnet;
+  const hash = magnet ? /btih:([0-9a-fA-F]{40})/.exec(magnet)?.[1]?.toLowerCase() : null;
+  return hash ?? `t:${candidate.result.title}`;
 }
 
 /** 可被中断的等待。 */
