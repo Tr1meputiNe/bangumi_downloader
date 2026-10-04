@@ -91,7 +91,32 @@ describeIfBuilt('界面渲染冒烟测试', () => {
     );
 
     const { config } = loadConfig({ configPath });
-    started = await startWebServer({ config, configPath, qbittorrent: undefined });
+    /*
+     * 塞一个「正在下载」的任务进去，用来验证进度旁边那行小字
+     * （还要多久）真的渲染出来了 —— 空队列是测不到的。
+     */
+    const { JobQueue } = await import('../src/core/jobs.js');
+    const fakeJobs = new JobQueue({
+      config,
+      configPath,
+      dispatch: (async (deps: { onProgress?: (p: unknown) => void }) => {
+        deps.onProgress?.({
+          ratio: 0.25,
+          downloadedBytes: 512 * 1048576,
+          totalBytes: 2048 * 1048576,
+          speed: 512 * 1024,
+          peers: 7
+        });
+        // 一直挂着，保持 running 状态
+        return await new Promise(() => {});
+      }) as never
+    });
+    fakeJobs.enqueue({
+      title: '测试中的番剧 第 1 集',
+      magnet: `magnet:?xt=urn:btih:${'9'.repeat(40)}`,
+      sizeBytes: 2048 * 1048576
+    });
+    started = await startWebServer({ config, configPath, qbittorrent: undefined, jobs: fakeJobs });
 
     const base = started.url;
     dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
@@ -154,11 +179,17 @@ describeIfBuilt('界面渲染冒烟测试', () => {
     expect(document.body.textContent).toContain('搜索片源');
   });
 
-  it('任务页在没有任务时给出空状态而不是报错', async () => {
+  it('任务页没有任务时给出空状态；有任务时显示进度和「还要多久」', async () => {
     await go('jobs');
     const document = dom.window.document;
     expect(document.body.textContent).toContain('下载任务');
-    expect(document.querySelector('.empty')).toBeTruthy();
+
+    // 测试服务器里塞了一个正在下的任务：512MB/2GB、512KB/s -> 还要约 51 分钟
+    const eta = document.querySelector('.job-eta');
+    expect(eta).toBeTruthy();
+    expect(eta?.textContent).toContain('还要');
+    expect(eta?.textContent).toMatch(/分钟|小时/);
+    expect(document.body.textContent).toContain('测试中的番剧');
   });
 
   it('计划页渲染计划任务、追番清单和 Planner 三块', async () => {
