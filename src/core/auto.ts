@@ -17,6 +17,7 @@ import {
   autoSchedulePath,
   clearStaleRunning,
   broadcastTimeOf,
+  doneKeys,
   clearRunning,
   publishRunning,
   decideRun,
@@ -295,7 +296,10 @@ async function computePlan(options: AutoOptions, report: AutoReport, now: Date):
           : null
       }));
 
-    if (subjects.length > 0) return planSchedule(subjects, now, planOptions);
+    if (subjects.length > 0) {
+      const state = options.configPath ? loadAutoSchedule(autoSchedulePath(options.configPath), now) : null;
+      return planSchedule(subjects, now, planOptions, doneKeys(state));
+    }
     log.debug(`Planner 里没有收藏状态为 ${[...wanted].join('/')} 的番剧，计划退回兜底节奏`);
   } catch (error) {
     log.debug(`算计划时问不到 Planner：${(error as Error).message}`);

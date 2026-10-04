@@ -534,3 +534,35 @@ describe('「正在下载」不能骗人：写它的进程不在了就不该再�
     expect(effectiveRunning(base())).toBeNull();
   });
 });
+
+describe('已经下过的集不再占着等待窗口', () => {
+  const now = at('2026-10-04 17:05');
+  const options = { readyDelayMinutes: 60, activeIntervalMinutes: 15, idleIntervalMinutes: 180, releaseWindowHours: 12 };
+
+  it('下过的集：不再算「正在等片源」，干活的检查推到下一集', () => {
+    const aired = subject('相反的你和我 第二季', 13, '2026-10-04', '16:00');
+    const nextWeek = subject('魔女', 1, '2026-10-05', '19:30');
+    const done = new Set([doneKey(aired.subjectId, 13)]);
+
+    const plan = planSchedule([aired, nextWeek], now, options, done);
+
+    // 第 13 集已经下过 → 不该再进活跃窗口（否则每 15 分钟白跑一轮）
+    expect(plan.due).toBe(false);
+    expect(plan.windows).toHaveLength(0);
+    // 下一次干活安排在下一集的「该取片源」时刻
+    expect(plan.nextCheckAt.getTime()).toBe(at('2026-10-05 20:30').getTime());
+  });
+
+  it('没下过的集照旧进活跃窗口', () => {
+    const aired = subject('相反的你和我 第二季', 13, '2026-10-04', '16:00');
+    const plan = planSchedule([aired], now, options, new Set());
+    expect(plan.due).toBe(true);
+    expect(plan.windows).toHaveLength(1);
+  });
+
+  it('别的集下过不影响这一集', () => {
+    const aired = subject('相反的你和我 第二季', 13, '2026-10-04', '16:00');
+    const done = new Set([doneKey(aired.subjectId, 12)]);
+    expect(planSchedule([aired], now, options, done).due).toBe(true);
+  });
+});

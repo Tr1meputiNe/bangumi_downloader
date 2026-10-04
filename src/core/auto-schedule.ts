@@ -303,7 +303,17 @@ export function broadcastTimeOf(airdate: string, airTime: string | null | undefi
   );
 }
 
-export function planSchedule(subjects: readonly SubjectNext[], now: Date, options: PlanOptions): SchedulePlan {
+/**
+ * @param done 已经下完的集（`doneKey` 的集合）。
+ *   下过的集不该再占着「等待窗口」—— 否则它会一直触发、每轮都只是打一行
+ *   「已经下过」，直到 Planner 那边标记成已看为止（实测会白跑几十轮）。
+ */
+export function planSchedule(
+  subjects: readonly SubjectNext[],
+  now: Date,
+  options: PlanOptions,
+  done: ReadonlySet<string> = new Set()
+): SchedulePlan {
   const activeInterval = Math.max(1, options.activeIntervalMinutes);
   const idleInterval = Math.max(activeInterval, options.idleIntervalMinutes);
   const readyDelayMs = Math.max(0, options.readyDelayMinutes) * 60_000;
@@ -317,6 +327,10 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
   for (const subject of subjects) {
     const next = subject.next;
     if (!next) continue;
+
+    // 这一集已经下过了：Planner 还标着「未看」是因为用户还没看，
+    // 但我们这边不用再安排检查了（等用户看完，Planner 自然会给下一集）
+    if (next.ep !== null && done.has(doneKey(subject.subjectId, next.ep))) continue;
 
     const broadcast = broadcastTimeOf(next.airdate, next.airTime);
     if (!broadcast) continue;
