@@ -301,8 +301,15 @@ export function PlanView() {
                               </span>
                               <span class="ellipsis" title=${row.name}>${row.name}</span>
                               <span class="mono small">${row.episode ?? '?'}</span>
-                              <span class="progress-cell" title=${`已看 ${row.watchedEpisodes} 集${row.totalEpisodesKnown ? ` / 共 ${row.totalEpisodes} 集` : '（总集数未定）'}`}>
-                                <span class="mono small">${row.watchedEpisodes}${row.totalEpisodesKnown ? `/${row.totalEpisodes}` : '/?'}</span>
+                              <span
+                                class="progress-cell"
+                                title=${row.totalEpisodesKnown
+                                  ? `已看 ${row.watchedEpisodes} 集 / 共 ${row.totalEpisodes} 集`
+                                  : `已看 ${row.watchedEpisodes} 集；Planner 说总集数还没确定（暂按 ${row.totalEpisodes} 集）`}
+                              >
+                                <span class="mono small"
+                                  >${row.watchedEpisodes}/${row.totalEpisodes}${row.totalEpisodesKnown ? '' : '?'}</span
+                                >
                                 <span class="mini-bar"><span
                                   class="mini-bar-fill"
                                   style=${`width:${row.totalEpisodes > 0 ? Math.min(100, Math.round((row.watchedEpisodes / row.totalEpisodes) * 100)) : 0}%`}
@@ -561,8 +568,13 @@ export function PlanView() {
                             ${subject.collectionType === 3 ? null : html` <${Badge}>${subject.collectionLabel}</${Badge}>`}
                           </span>
                           <span class="progress-cell">
-                            <span class="mono small">
-                              ${subject.watchedEpisodes}${subject.totalEpisodesKnown ? `/${subject.totalEpisodes}` : '/?'}
+                            <span
+                              class="mono small"
+                              title=${subject.totalEpisodesKnown
+                                ? `已看 ${subject.watchedEpisodes} 集 / 共 ${subject.totalEpisodes} 集`
+                                : `Planner 说总集数还没确定（暂按 ${subject.totalEpisodes} 集）`}
+                            >
+                              ${subject.watchedEpisodes}/${subject.totalEpisodes}${subject.totalEpisodesKnown ? '' : '?'}
                             </span>
                             <span class="mini-bar"><span
                               class="mini-bar-fill"
