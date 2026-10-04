@@ -52,6 +52,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --clean-empty       verify 时把「一个有效分片都没有」的空壳目录删掉
   --add-local         verify 时把下载目录里没记录过的内容（例如自己用别的工具下的）加进本地清单
   --no-playable       verify 时跳过「文件能不能播」抽检（文件多时更快）
+  --no-planner        auto 时只读 watchlist.json，不去问 3777 的 Watch Planner
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -616,7 +617,14 @@ async function cmdRun(config: AppConfig, mode: DownloadMode): Promise<number> {
 async function cmdAuto(
   config: AppConfig,
   configPath: string,
-  options: { watchlistFile?: string; daemon: boolean; intervalMinutes?: number; dryRun: boolean; retryRounds: number }
+  options: {
+    watchlistFile?: string;
+    daemon: boolean;
+    intervalMinutes?: number;
+    dryRun: boolean;
+    retryRounds: number;
+    preferPlanner: boolean;
+  }
 ): Promise<number> {
   const path = options.watchlistFile ?? watchlistPath(configPath);
   if (ensureWatchlistExample(path)) {
@@ -656,7 +664,8 @@ async function cmdAuto(
       configPath,
       dryRun: options.dryRun,
       watchlistFile: options.watchlistFile,
-      retryRounds: options.retryRounds
+      retryRounds: options.retryRounds,
+      preferPlanner: options.preferPlanner
     });
     log.info(
       `本轮结束：清单 ${report.subjects} 条，检查 ${report.checked} 条，` +
@@ -744,6 +753,7 @@ export async function main(argv: string[]): Promise<number> {
       'clean-empty': { type: 'boolean', default: false },
       'add-local': { type: 'boolean', default: false },
       'no-playable': { type: 'boolean', default: false },
+      'no-planner': { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -817,7 +827,8 @@ export async function main(argv: string[]): Promise<number> {
         daemon: values.daemon,
         intervalMinutes: values.interval !== undefined ? Number(values.interval) : undefined,
         dryRun: values['dry-run'] || config.download.enabled === false,
-        retryRounds: resolveRetryRounds(config, values.retry, values['no-retry'])
+        retryRounds: resolveRetryRounds(config, values.retry, values['no-retry']),
+        preferPlanner: !values['no-planner']
       });
     case 'run':
       return cmdRun(config, mode);

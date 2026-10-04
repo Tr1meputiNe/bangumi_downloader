@@ -61,6 +61,14 @@ export type DownloadPreference = {
   maxAttempts?: number;
   /** 一次 download 的总时间预算（分钟）。默认 360。 */
   budgetMinutes?: number;
+  /**
+   * 播出后过多少分钟才认为「片源该出来了」。
+   *
+   * 片源站一般在新番播出后 30~60 分钟出种。设成 60 的话，程序不会在
+   * 播出当天一整天反复搜，而是等到该有链接了才开始尝试。默认 60。
+   * 设为 0 表示不判断时刻（保持旧行为）。
+   */
+  readyDelayMinutes?: number;
   /** 单次命令最多重试几轮（每轮都从磁盘进度继续）。默认 6。 */
   retryRounds?: number;
   /** 重试间隔（分钟），之后按倍数退避。默认 10。 */
@@ -195,6 +203,7 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     minThroughputKBps: 30,
     maxAttempts: 8,
     budgetMinutes: 360,
+    readyDelayMinutes: 60,
     retryRounds: 6,
     retryBackoffMinutes: 10,
     retryMaxBackoffMinutes: 120,

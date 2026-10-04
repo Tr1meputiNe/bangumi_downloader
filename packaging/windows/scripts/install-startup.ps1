@@ -43,11 +43,15 @@ $arguments = 'auto --retry 6'
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $root
 
-# 每 30 分钟触发一次；同时保留登录触发，保证开机后尽快跑一次
+# 每 15 分钟触发一次；同时保留登录触发，保证开机后尽快跑一次。
+#
+# 为什么是 15 分钟：番剧播出后 30~60 分钟片源站才会出种。程序内部会按
+# 「播出时刻 + readyDelayMinutes(默认60)」判断该不该找，所以 15 分钟一轮
+# 既能在那之后尽快发现新种，又不会在播出当天一整天瞎搜。
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $triggerRepeat = New-ScheduledTaskTrigger `
     -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes 30) `
+    -RepetitionInterval (New-TimeSpan -Minutes 15) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
 # S4U：不需要存密码，也不需要用户登录，后台静默运行
@@ -93,7 +97,7 @@ Write-Host "全自动追番已装好：$taskName" -ForegroundColor Green
 Write-Host "   程序目录：$root"
 Write-Host "   追番清单：$watchlist"
 Write-Host "   下载目录：$savePath"
-Write-Host "   触发频率：每 30 分钟检查一次新集"
+Write-Host "   触发频率：每 15 分钟检查一次新集"
 Write-Host "   单次上限：4 小时（到点由下一次触发接着下，进度不丢）"
 Write-Host ''
 Write-Host "   已立即启动一次（上次结果码 $($info.LastTaskResult)）。"

@@ -178,6 +178,17 @@ export class PlannerClient {
     today: string;
     onlyAiredAfter?: string | null;
     lookbackDays?: number | null;
+    /**
+     * 播出后过多少分钟才算「片源该出来了」。
+     *
+     * 为什么需要：片源站出种通常在播出后 30~60 分钟。只按「播出日期 <= 今天」
+     * 判断的话，播出当天一整天都会去搜，每次都搜不到，白跑很多轮；
+     * 有了这个缓冲，程序会在「该有链接了」之后才开始尝试。
+     * 留空或 0 表示不判断时刻，只看日期（保持旧行为）。
+     */
+    readyDelayMinutes?: number | null;
+    /** 当前时间，便于测试注入。默认取系统时间。 */
+    now?: Date;
   }): Promise<AnimeGap[]> {
     const dashboard = await this.dashboard();
     const wanted = new Set(options.collectionTypes);
@@ -210,6 +221,8 @@ export class PlannerClient {
         const airDate = toDateOnly(episode.airdate);
         // 未播出的集不下载
         if (airDate === null || airDate > options.today) continue;
+        // 播出了但还没到「片源该出来了」的时间，本轮先跳过，下一轮再试
+        if (!isEpisodeReady(episode, options.readyDelayMinutes, options.now)) continue;
         if (lowerBound && airDate < lowerBound) continue;
         // 同集号取先出现的
         if (!episodeMeta.has(episode.ep)) episodeMeta.set(episode.ep, episode);
@@ -233,6 +246,46 @@ export class PlannerClient {
 
 export function displayName(subject: Pick<PlannerSubject, 'nameCn' | 'name'>): string {
   return subject.nameCn?.trim() || subject.name;
+}
+
+/**
+ * 这一集现在「该有片源了吗」。
+ *
+ * 片源站一般在播出后 30~60 分钟出种，所以这里用
+ * 「播出日期 + 播出时刻 + 缓冲分钟」算一个时间点，早于它就先不下。
+ *
+ * 拿不到播出时刻（airTime 缺失，老数据或非 simulcast）时返回 true ——
+ * 宁可早试几次，也不要因为缺字段而永远不下。
+ */
+export function isEpisodeReady(episode: Pick<PlannerEpisode, 'airdate' | 'airTime'>, readyDelayMinutes?: number | null, now: Date = new Date()): boolean {
+  const delay = readyDelayMinutes ?? 0;
+  if (!Number.isFinite(delay) || delay <= 0) return true;
+
+  const airDate = toDateOnly(episode.airdate);
+  if (airDate === null) return true;
+
+  const time = parseAirTime(episode.airTime);
+  if (time === null) return true;
+
+  const broadcast = new Date(`${airDate}T${pad2(time.hour)}:${pad2(time.minute)}:00`);
+  if (Number.isNaN(broadcast.getTime())) return true;
+
+  return now.getTime() >= broadcast.getTime() + delay * 60_000;
+}
+
+/** 解析 "16:00" / "16:00:00" 形式的播出时刻。失败返回 null。 */
+function parseAirTime(value: string | undefined | null): { hour: number; minute: number } | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{1,2}):(\d{2})/.exec(value.trim());
+  if (!match) return null;
+  const hour = Number.parseInt(match[1] as string, 10);
+  const minute = Number.parseInt(match[2] as string, 10);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 23 || minute > 59) return null;
+  return { hour, minute };
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
 }
 
 function shiftAiredLimit(today: string, days: number): string {

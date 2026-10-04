@@ -9,6 +9,8 @@ import {
   WATCHLIST_FILENAME,
   type WatchEntry
 } from './watchlist.js';
+import { PlannerClient, displayName, type AnimeGap } from '../planner/client.js';
+import { today as todayString } from '../util/text.js';
 import { logger } from '../util/log.js';
 
 const log = logger('auto');
@@ -34,6 +36,17 @@ export type AutoOptions = {
   retryRounds?: number;
   /** 集号的合理上限（配合中位数判断，用来过滤剧场版年份/分辨率被误认成集号）。 */
   saneEpisodeLimit?: number;
+  /**
+   * 优先从 Bangumi Watch Planner（默认 127.0.0.1:3777）取「要下什么」，
+   * 而不是读本地的 watchlist.json。
+   *
+   * 这是两种数据来源：
+   *   - Planner：权威的在看/未看/已播出状态，跨机器（例如下载器在 Windows，
+   *     Planner 在 Mac 上，经 Tailscale 访问）
+   *   - 清单：不依赖任何外部服务，但需要自己维护番名
+   * 连不上 Planner 时自动退回清单，不会因为 Planner 没开就什么都不做。
+   */
+  preferPlanner?: boolean;
 };
 
 export type AutoReport = {
@@ -45,6 +58,167 @@ export type AutoReport = {
 
 /** 跑一轮：对清单里每一部番，找出「还没下的集」并下载。 */
 export async function runAuto(options: AutoOptions): Promise<AutoReport> {
+  const { config } = options;
+  const savePath = config.download.savePath || config.qbittorrent.savePath;
+  if (!savePath) {
+    log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
+    return { subjects: 0, checked: 0, downloaded: [], skipped: [] };
+  }
+
+  // 优先问 Planner；连不上再退回本地清单
+  if (options.preferPlanner !== false) {
+    const fromPlanner = await runFromPlanner(options, savePath).catch((error: unknown) => {
+      log.warn(`Planner 不可用（${(error as Error).message}），改用本地 watchlist.json`);
+      return null;
+    });
+    if (fromPlanner) return fromPlanner;
+  }
+
+  return await runFromWatchlist(options, savePath);
+}
+
+/**
+ * 数据来源一：Bangumi Watch Planner。
+ *
+ * 它给出的是「在看 + 未看 + 已播出」的准确集数，还带播出时刻 ——
+ * 所以可以等「播出后 N 分钟」再开始找片源，而不是播出当天一整天瞎搜。
+ */
+async function runFromPlanner(options: AutoOptions, savePath: string): Promise<AutoReport | null> {
+  const { config } = options;
+  const planner = new PlannerClient({
+    baseUrl: config.plannerBaseUrl,
+    timeoutMs: config.trackers.timeoutMs ?? 15_000,
+    retries: 1
+  });
+
+  const gaps = await planner.collectGaps({
+    collectionTypes: config.collectionTypes,
+    includeBacklog: config.includeBacklog,
+    today: todayString(),
+    onlyAiredAfter: config.download.onlyAiredAfter ?? null,
+    lookbackDays: config.download.lookbackDays ?? null,
+    readyDelayMinutes: config.download.readyDelayMinutes ?? null
+  });
+
+  const report: AutoReport = { subjects: gaps.length, checked: 0, downloaded: [], skipped: [] };
+  if (gaps.length === 0) {
+    log.info('Planner 里没有「已播出但没看」的集数');
+    return report;
+  }
+
+  log.info(`数据来源：Bangumi Watch Planner（${config.plannerBaseUrl}）`);
+
+  const maxPerSubject = options.maxEpisodesPerSubject ?? config.download.maxEpisodesPerSubjectPerRun ?? 999;
+
+  for (const gap of gaps) {
+    const name = displayName(gap.subject);
+    report.checked += 1;
+    try {
+      const outcome = await downloadForGap(gap, {
+        config,
+        savePath,
+        dryRun: options.dryRun,
+        maxPerSubject,
+        retryRounds: options.retryRounds,
+        saneEpisodeLimit: options.saneEpisodeLimit
+      });
+
+      if (outcome.episodes.length === 0) {
+        report.skipped.push({ query: name, reason: outcome.reason });
+        log.info(`《${name}》：${outcome.reason}`);
+        continue;
+      }
+      if (!outcome.downloaded) {
+        report.skipped.push({ query: name, reason: 'dry-run 模式，只挑选' });
+        continue;
+      }
+      report.downloaded.push({
+        query: name,
+        episodes: outcome.episodes,
+        files: outcome.files,
+        completed: outcome.completed,
+        bytesWritten: outcome.bytesWritten ?? 0
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      report.skipped.push({ query: name, reason });
+      log.warn(`《${name}》处理失败：${reason}`);
+    }
+  }
+
+  return report;
+}
+
+/** Planner 的某一集用哪条发布，交给和 download 命令相同的那条路径。 */
+async function downloadForGap(gap: AnimeGap, options: {
+  config: AppConfig;
+  savePath: string;
+  dryRun: boolean;
+  maxPerSubject: number;
+  retryRounds?: number;
+  saneEpisodeLimit?: number;
+}): Promise<EntryOutcome> {
+  const { config } = options;
+  const name = displayName(gap.subject);
+  const wanted = gap.missingEpisodes.slice(0, options.maxPerSubject);
+
+  if (wanted.length === 0) {
+    return { episodes: [], reason: '没有已播出的未看集数', downloaded: false, files: 0, completed: false };
+  }
+
+  log.info(`《${name}》待下第 ${wanted.join('/')} 集`);
+
+  const targets = gap.missingEpisodes.map((episode) => {
+    const meta = gap.episodeMeta.get(episode);
+    return {
+      subjectId: gap.subject.id,
+      subjectName: gap.subject.name,
+      subjectNameCn: gap.subject.nameCn,
+      episode,
+      season: meta ? gap.season : gap.season,
+      airDate: meta ? meta.airdate : null
+    };
+  });
+
+  const outcome = await searchAndRank({
+    query: gap.queries[0] ?? name,
+    altQuery: gap.queries[1],
+    config,
+    // 自动追番必须按集号严格匹配：下错集是硬伤
+    mode: 'automation',
+    targets: targets.filter((target) => wanted.includes(target.episode)),
+    targetSeason: gap.season
+  });
+
+  if (outcome.ranked.length === 0) {
+    return { episodes: wanted, reason: '没搜到任何候选', downloaded: false, files: 0, completed: false };
+  }
+
+  if (options.dryRun) {
+    return { episodes: wanted, reason: 'dry-run', downloaded: false, files: 0, completed: false };
+  }
+
+  const result = await downloadUntilComplete({
+    candidates: outcome.ranked,
+    config,
+    episodes: wanted,
+    savePath: options.savePath,
+    rounds: options.retryRounds,
+    onLog: (message) => log.debug(message)
+  });
+
+  return {
+    episodes: wanted,
+    reason: result.completed ? '完成' : `试了 ${result.rounds} 轮仍未下完`,
+    downloaded: true,
+    files: result.files.length,
+    completed: result.completed,
+    bytesWritten: result.bytesWritten
+  };
+}
+
+/** 数据来源二：本地 watchlist.json。 */
+async function runFromWatchlist(options: AutoOptions, savePath: string): Promise<AutoReport> {
   const { config } = options;
   const path = options.watchlistFile ?? watchlistPath(options.configPath);
   const list = loadWatchlist(path);
@@ -65,12 +239,6 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   if (active.length === 0) {
     log.warn(`追番清单里 ${list.entries.length} 条全被禁用了（enabled: false），本轮不会做任何事。`);
     log.warn(`清单文件：${path} 把 enabled 改成 true 或删掉该字段即可启用。`);
-    return report;
-  }
-
-  const savePath = config.download.savePath || config.qbittorrent.savePath;
-  if (!savePath) {
-    log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
     return report;
   }
 
