@@ -5,6 +5,14 @@ import { Badge, Card, Empty, ProgressBar, Spinner, StatusDot } from '../componen
 import { compactEpisodes, formatClock, relativeTime, shortenPath } from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
 
+/** 180 → 「3 小时」，90 → 「1 小时 30 分」。 */
+function formatIdle(minutes: number | undefined): string {
+  if (!minutes || minutes <= 0) return '—';
+  if (minutes < 60) return `${minutes} 分钟`;
+  if (minutes % 60 === 0) return `${minutes / 60} 小时`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
+
 /**
  * 计划页：这套程序「自己会做什么」都在这里。
  *
@@ -126,7 +134,7 @@ export function PlanView() {
     <div class="view">
       <${Card}
         title="自动追番"
-        hint="和计划任务里跑的是同一条代码路径；手动点一次不会和定时任务撞车（有单实例锁）"
+        hint="不是每 15 分钟无脑跑：按播出时间安排，只在「该出片源」的时候密集检查"
         actions=${html`
           <button type="button" class="ghost" disabled=${busy} onClick=${() => void runAuto(true)}>试跑一轮</button>
           <button type="button" disabled=${busy} onClick=${() => void runAuto(false)}>立即跑一轮</button>
@@ -139,11 +147,29 @@ export function PlanView() {
               <a href="#/jobs" class="linklike">看详细进度</a>
             `
           : html`
+              ${data?.schedule
+                ? html`
+                    <div class="schedule-line">
+                      <span class="dim">下次检查</span>
+                      <strong>${data.schedule.nextCheckText}</strong>
+                      ${data.schedule.windows.length > 0
+                        ? html`<${Badge} kind="ok">正在等片源 ${data.schedule.windows.length} 集</${Badge}>`
+                        : null}
+                    </div>
+                    <div class="dim small">${data.schedule.nextReason}</div>
+                  `
+                : null}
               <div class="kv-grid">
                 <div><span class="dim">下载目录</span><div class="mono small">${data?.download.savePath ?? '—'}</div></div>
                 <div><span class="dim">片源就绪延迟</span><div>播出后 ${data?.download.readyDelayMinutes ?? '—'} 分钟才开始找</div></div>
+                <div><span class="dim">等片源时间隔</span><div>每 ${data?.schedule?.activeIntervalMinutes ?? 15} 分钟一次</div></div>
+                <div><span class="dim">空闲兜底间隔</span><div>每 ${formatIdle(data?.schedule?.idleIntervalMinutes)} 确认一次计划</div></div>
+                <div><span class="dim">单集最多盯</span><div>${data?.schedule?.releaseWindowHours ?? 12} 小时</div></div>
                 <div><span class="dim">单轮最多下几集</span><div>${data?.download.maxEpisodesPerSubjectPerRun ?? '—'} 集</div></div>
-                <div><span class="dim">每部重试轮数</span><div>${data?.download.retryRounds ?? '—'} 轮</div></div>
+              </div>
+              <div class="dim small">
+                已经下过的集记在 ${data?.schedule?.file ? html`<span class="mono">${data.schedule.file}</span>` : '计划文件'} 里
+                （当前 ${data?.schedule?.doneCount ?? 0} 条），Planner 那边还没标「看过」的集不会被重复下载。
               </div>
             `}
       <//>

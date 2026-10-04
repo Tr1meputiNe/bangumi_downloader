@@ -224,10 +224,25 @@ export type WatchEntryView = {
   enabled: boolean;
 };
 
+export type AutoScheduleView = {
+  file: string | null;
+  nextCheckAt: string | null;
+  nextReason: string;
+  /** 服务端算好的「多久之后」说法，例如「3 小时后（10-04 19:00）」。 */
+  nextCheckText: string;
+  updatedAt: string | null;
+  windows: Array<{ query: string; episode: number | null; readyAt: string; until: string }>;
+  doneCount: number;
+  activeIntervalMinutes: number;
+  idleIntervalMinutes: number;
+  releaseWindowHours: number;
+};
+
 export type WatchlistResponse = {
   file: string | null;
   entries: WatchEntryView[];
   planner: PlannerView;
+  schedule: AutoScheduleView;
   download: {
     savePath: string;
     readyDelayMinutes: number;
@@ -308,6 +323,13 @@ export type OverviewResponse = {
   };
   tasks: TaskView[];
   planner: PlannerView;
+  /** 自动追番的「下次什么时候检查」。 */
+  autoSchedule: {
+    nextCheckAt: string | null;
+    nextReason: string;
+    nextCheckText: string;
+    windows: number;
+  };
   schedule: ScheduleResponse;
 };
 

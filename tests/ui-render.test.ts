@@ -123,6 +123,8 @@ describeIfBuilt('界面渲染冒烟测试', () => {
     expect(text).toContain('追番清单');
     expect(text).toContain('测试番剧');
     expect(text).toContain('下一集找第 4 集');
+    // 计划页要能回答「下次什么时候检查」
+    expect(text).toContain('下次检查');
   });
 
   it('片库页列出条目，点开后能看到文件', async () => {

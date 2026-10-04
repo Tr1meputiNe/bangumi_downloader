@@ -10,6 +10,23 @@ import {
   type WatchEntry
 } from './watchlist.js';
 import { PlannerClient, displayName, type AnimeGap } from '../planner/client.js';
+import {
+  applyPlan,
+  autoSchedulePath,
+  decideRun,
+  formatClock,
+  isEpisodeDone,
+  loadAutoSchedule,
+  markEpisodesDone,
+  planSchedule,
+  planWithoutPlanner,
+  pruneDone,
+  saveAutoSchedule,
+  type AutoScheduleState,
+  type PlanOptions,
+  type SchedulePlan,
+  type SubjectNext
+} from './auto-schedule.js';
 import { today as todayString } from '../util/text.js';
 import { logger } from '../util/log.js';
 
@@ -47,6 +64,17 @@ export type AutoOptions = {
    * 连不上 Planner 时自动退回清单，不会因为 Planner 没开就什么都不做。
    */
   preferPlanner?: boolean;
+  /**
+   * 忽略「什么时候该检查」的计划，立刻真干活。
+   *
+   * 手动触发（网页上点「立即跑一轮」、命令行 `auto --force`）用它；
+   * 计划任务不加 —— 那里正是要靠计划把 96 轮/天压到「只在播出前后跑」。
+   */
+  force?: boolean;
+  /** 关掉计划判断（调试用：等价于永远 force）。 */
+  respectSchedule?: boolean;
+  /** 当前时间（测试注入用）。 */
+  now?: Date;
 };
 
 export type AutoReport = {
@@ -62,6 +90,10 @@ export type AutoReport = {
   source: 'planner' | 'watchlist';
   downloaded: Array<{ query: string; episodes: number[]; files: number; completed: boolean; bytesWritten: number }>;
   skipped: Array<{ query: string; reason: string }>;
+  /** 因为「还没到该检查的时间」整轮跳过（没有任何网络请求）。 */
+  skippedBySchedule?: boolean;
+  /** 本轮之后安排的下次检查，界面上直接显示。 */
+  schedule?: { nextCheckAt: string | null; reason: string; due: boolean };
 };
 
 /** 跑一轮：对清单里每一部番，找出「还没下的集」并下载。 */
@@ -73,9 +105,79 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
     return { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'watchlist' };
   }
 
-  // 优先问 Planner；连不上再退回本地清单
+  const now = options.now ?? new Date();
+  const schedulePath = autoSchedulePath(options.configPath);
+  const respectSchedule = options.respectSchedule !== false && options.force !== true;
+
+  /*
+   * 第一步：现在值得跑吗。
+   *
+   * 新番按周在固定时间播出，片源要等播出后半小时到一小时 ——
+   * 每 15 分钟无脑跑一轮的话，一天 96 轮里绝大多数只是白问一遍 Planner、
+   * 白搜一遍片源站。这里先看计划，没到点就**一次网络请求都不发**直接退出。
+   */
+  let state: AutoScheduleState | null = null;
+  if (options.configPath) state = loadAutoSchedule(schedulePath, now);
+
+  if (respectSchedule && options.configPath) {
+    const decision = decideRun(state, now, { force: false });
+    if (!decision.run) {
+      /*
+       * 跳过的日志只在「原因变了」的时候打一遍。
+       * 每 15 分钟写一行同样的字会把日志刷满，真正的问题反而被埋掉。
+       */
+      const changed = state?.lastSkipReason !== decision.reason;
+      if (changed) log.info(decision.reason);
+      else log.debug(decision.reason);
+
+      if (state && state.lastSkipReason !== decision.reason) {
+        state.lastSkipReason = decision.reason;
+        saveAutoSchedule(schedulePath, state);
+      }
+
+      return {
+        subjects: 0,
+        checked: 0,
+        downloaded: [],
+        skipped: [],
+        source: 'planner',
+        skippedBySchedule: true,
+        schedule: { nextCheckAt: state?.nextCheckAt ?? null, reason: state?.nextReason ?? decision.reason, due: false }
+      };
+    }
+    log.info(`开始检查：${decision.reason}`);
+  }
+
+  const report = await runAutoInner(options, savePath, state, now);
+
+  // 第三步：算下一轮什么时候再来（这一步只问 Planner，不搜片源）
+  if (options.configPath) {
+    const plan = await computePlan(options, report, now);
+    const updated = state ?? loadAutoSchedule(schedulePath, now);
+    applyPlan(updated, plan, now);
+    updated.lastSkipReason = null;
+    pruneDone(updated, now);
+    saveAutoSchedule(schedulePath, updated);
+
+    report.schedule = { nextCheckAt: plan.nextCheckAt.toISOString(), reason: plan.reason, due: plan.due };
+    log.info(`下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
+    for (const item of plan.stale.slice(0, 5)) {
+      log.debug(`《${item.query}》第 ${item.episode ?? '?'} 集播出已久仍没找到片源，本集不再密集检查`);
+    }
+  }
+
+  return report;
+}
+
+/** 真正干活的两种数据来源。 */
+async function runAutoInner(
+  options: AutoOptions,
+  savePath: string,
+  state: AutoScheduleState | null,
+  now: Date
+): Promise<AutoReport> {
   if (options.preferPlanner !== false) {
-    const fromPlanner = await runFromPlanner(options, savePath).catch((error: unknown) => {
+    const fromPlanner = await runFromPlanner(options, savePath, state, now).catch((error: unknown) => {
       log.warn(`Planner 不可用（${(error as Error).message}），改用本地 watchlist.json`);
       return null;
     });
@@ -85,13 +187,66 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   return await runFromWatchlist(options, savePath);
 }
 
+/** 算下一轮检查时间：优先按 Planner 的播出安排，问不到就按上次下载时间估。 */
+async function computePlan(options: AutoOptions, report: AutoReport, now: Date): Promise<SchedulePlan> {
+  const planOptions: PlanOptions = {
+    readyDelayMinutes: options.config.download.readyDelayMinutes ?? 60,
+    activeIntervalMinutes: options.config.download.activeIntervalMinutes ?? 15,
+    idleIntervalMinutes: options.config.download.idleIntervalMinutes ?? 180,
+    releaseWindowHours: options.config.download.releaseWindowHours ?? 12
+  };
+
+  const planner = new PlannerClient({
+    baseUrl: options.config.plannerBaseUrl,
+    timeoutMs: Math.min(options.config.trackers.timeoutMs ?? 15_000, 8000),
+    retries: 0
+  });
+
+  try {
+    const dashboard = await planner.dashboard();
+    const wanted = new Set(options.config.collectionTypes);
+    const subjects: SubjectNext[] = dashboard.subjects
+      .filter((subject) => wanted.has(subject.collectionType))
+      .map((subject) => ({
+        subjectId: subject.id,
+        name: displayName(subject),
+        next: subject.nextEpisode
+          ? { ep: subject.nextEpisode.ep, airdate: subject.nextEpisode.airdate, airTime: subject.nextEpisode.airTime ?? null }
+          : null
+      }));
+
+    if (subjects.length > 0) return planSchedule(subjects, now, planOptions);
+    log.debug(`Planner 里没有收藏状态为 ${[...wanted].join('/')} 的番剧，计划退回兜底节奏`);
+  } catch (error) {
+    log.debug(`算计划时问不到 Planner：${(error as Error).message}`);
+  }
+
+  // 兜底：用刚下到的最后一条（或者历史上最后一条）当「一周一集」的参考
+  const last = report.downloaded.filter((item) => item.completed).at(-1) ?? null;
+  const state = options.configPath ? loadAutoSchedule(autoSchedulePath(options.configPath), now) : null;
+  const reference =
+    last !== null
+      ? { at: now.toISOString(), query: last.query }
+      : (() => {
+          const done = state?.done.at(-1);
+          return done ? { at: done.at, query: done.query } : null;
+        })();
+
+  return planWithoutPlanner(now, planOptions, reference);
+}
+
 /**
  * 数据来源一：Bangumi Watch Planner。
  *
  * 它给出的是「在看 + 未看 + 已播出」的准确集数，还带播出时刻 ——
  * 所以可以等「播出后 N 分钟」再开始找片源，而不是播出当天一整天瞎搜。
  */
-async function runFromPlanner(options: AutoOptions, savePath: string): Promise<AutoReport | null> {
+async function runFromPlanner(
+  options: AutoOptions,
+  savePath: string,
+  state: AutoScheduleState | null,
+  now: Date
+): Promise<AutoReport | null> {
   const { config } = options;
   const planner = new PlannerClient({
     baseUrl: config.plannerBaseUrl,
@@ -128,7 +283,18 @@ async function runFromPlanner(options: AutoOptions, savePath: string): Promise<A
         dryRun: options.dryRun,
         maxPerSubject,
         retryRounds: options.retryRounds,
-        saneEpisodeLimit: options.saneEpisodeLimit
+        saneEpisodeLimit: options.saneEpisodeLimit,
+        // 已经下过的集不再重复搜索下载（Planner 的「未看」不会因为我们下完就变）
+        isDone: (episode) => isEpisodeDone(state, gap.subject.id, episode),
+        onCompleted: (episodes) => {
+          if (!state) return;
+          const added = markEpisodesDone(
+            state,
+            episodes.map((episode) => ({ subjectId: gap.subject.id, episode, query: name })),
+            now
+          );
+          if (added > 0) log.info(`《${name}》第 ${episodes.join('/')} 集已记录为「已下完」，下轮不会再下`);
+        }
       });
 
       if (outcome.episodes.length === 0) {
@@ -165,10 +331,33 @@ async function downloadForGap(gap: AnimeGap, options: {
   maxPerSubject: number;
   retryRounds?: number;
   saneEpisodeLimit?: number;
+  /** 这一集是不是之前已经下完了（Planner 那边仍显示「未看」）。 */
+  isDone?: (episode: number) => boolean;
+  /** 确认下完之后回调，用来记住「别再下了」。 */
+  onCompleted?: (episodes: number[]) => void;
 }): Promise<EntryOutcome> {
   const { config } = options;
   const name = displayName(gap.subject);
-  const wanted = gap.missingEpisodes.slice(0, options.maxPerSubject);
+
+  /*
+   * Planner 的「未看」只反映你有没有看，不反映我们下没下过。
+   * 不管这一层的话，一集下完之后每个 15 分钟周期都会再去搜一遍同一个种子，
+   * 直到用户看完它为止 —— 既是白费带宽，也是在反复捶片源站。
+   */
+  const already = gap.missingEpisodes.filter((episode) => options.isDone?.(episode) === true);
+  const pending = gap.missingEpisodes.filter((episode) => !already.includes(episode));
+  if (already.length > 0) log.debug(`《${name}》第 ${already.join('/')} 集已经下过了，跳过`);
+  if (pending.length === 0) {
+    return {
+      episodes: [],
+      reason: `第 ${already.join('/')} 集已经下过（等你看完，Planner 就会给下一集）`,
+      downloaded: false,
+      files: 0,
+      completed: false
+    };
+  }
+
+  const wanted = pending.slice(0, options.maxPerSubject);
 
   if (wanted.length === 0) {
     return { episodes: [], reason: '没有已播出的未看集数', downloaded: false, files: 0, completed: false };
@@ -214,6 +403,9 @@ async function downloadForGap(gap: AnimeGap, options: {
     rounds: options.retryRounds,
     onLog: (message) => log.debug(message)
   });
+
+  // 只有真下完了才记「别再下了」：下到一半的下一轮还要继续
+  if (result.completed) options.onCompleted?.(wanted);
 
   return {
     episodes: wanted,

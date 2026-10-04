@@ -411,7 +411,9 @@ export async function runAutoTask(
       configPath: deps.configPath,
       dryRun,
       retryRounds: deps.config.download.retryRounds ?? 6,
-      preferPlanner: true
+      preferPlanner: true,
+      // 手动点的按钮就忽略播出计划：用户是明确要看「现在会下什么」
+      force: true
     });
 
     // runAuto 连不上 Planner 时会自动退回清单；这里照实说明本轮用的是哪一份
@@ -425,6 +427,9 @@ export async function runAutoTask(
     }
     for (const item of report.skipped) {
       context.note(`跳过《${item.query}》：${item.reason}`);
+    }
+    if (report.schedule?.nextCheckAt) {
+      context.note(`下次自动检查：${report.schedule.reason}`);
     }
     context.step(`本轮结束：检查 ${report.checked} 条，新下载 ${report.downloaded.length} 条`, 1);
 

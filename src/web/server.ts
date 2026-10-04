@@ -9,6 +9,7 @@ import { JobQueue } from '../core/jobs.js';
 import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
 import { loadWatchlist, nextEpisodeOf, removeWatchEntry, upsertWatchEntry, watchlistPath, type WatchEntry } from '../core/watchlist.js';
+import { autoSchedulePath, describeNextCheck, loadAutoSchedule, type AutoScheduleState } from '../core/auto-schedule.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -264,6 +265,15 @@ async function buildOverview(deps: WebDeps) {
     },
     tasks: tasks.slice(0, 5),
     planner,
+    autoSchedule: (() => {
+      const current = currentAutoSchedule(deps);
+      return {
+        nextCheckAt: current.state?.nextCheckAt ?? null,
+        nextReason: current.state?.nextReason ?? '',
+        nextCheckText: current.nextCheckText,
+        windows: current.state?.windows.length ?? 0
+      };
+    })(),
     schedule
   };
 }
@@ -728,6 +738,19 @@ function toPlannerSubjectView(subject: PlannerSubject): PlannerSubjectView {
   };
 }
 
+/**
+ * 自动追番的「下次什么时候检查」计划。
+ *
+ * 计划任务每 15 分钟触发一次，但真正干活只在播出前后 ——
+ * 界面上必须能看见这个安排，否则「为什么现在没动静」没人答得上来。
+ */
+function currentAutoSchedule(deps: WebDeps): { file: string | null; state: AutoScheduleState | null; nextCheckText: string } {
+  if (!deps.configPath) return { file: null, state: null, nextCheckText: '未知' };
+  const file = autoSchedulePath(deps.configPath);
+  const state = loadAutoSchedule(file);
+  return { file, state, nextCheckText: describeNextCheck(state) };
+}
+
 function currentWatchlist(deps: WebDeps): { file: string | null; entries: WatchEntry[] } {
   const file = deps.configPath ? watchlistPath(deps.configPath) : null;
   if (!file) return { file: null, entries: [] };
@@ -750,6 +773,21 @@ async function buildWatchlist(deps: WebDeps) {
       enabled: entry.enabled !== false
     })),
     planner,
+    schedule: (() => {
+      const current = currentAutoSchedule(deps);
+      return {
+        file: current.file,
+        nextCheckAt: current.state?.nextCheckAt ?? null,
+        nextReason: current.state?.nextReason ?? '',
+        nextCheckText: current.nextCheckText,
+        updatedAt: current.state?.updatedAt ?? null,
+        windows: current.state?.windows ?? [],
+        doneCount: current.state?.done.length ?? 0,
+        activeIntervalMinutes: deps.config.download.activeIntervalMinutes ?? 15,
+        idleIntervalMinutes: deps.config.download.idleIntervalMinutes ?? 180,
+        releaseWindowHours: deps.config.download.releaseWindowHours ?? 12
+      };
+    })(),
     download: {
       savePath: deps.config.download.savePath || deps.config.qbittorrent.savePath || '',
       readyDelayMinutes: deps.config.download.readyDelayMinutes ?? 60,

@@ -98,6 +98,10 @@ export function OverviewView() {
                         .map((entry) => `${entry.query} → 第 ${entry.nextEpisode} 集`)
                         .join('、')}
                 </div>
+                <div class="dim small" title=${overview.autoSchedule.nextReason}>
+                  下次检查：${overview.autoSchedule.nextCheckText}
+                  ${overview.autoSchedule.windows > 0 ? ` · 正在等片源 ${overview.autoSchedule.windows} 集` : ''}
+                </div>
               `
             : html`<${Spinner} />`}
           <div class="stat-actions">

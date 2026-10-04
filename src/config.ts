@@ -82,6 +82,27 @@ export type DownloadPreference = {
    * 设为 0 表示不判断时刻（保持旧行为）。
    */
   readyDelayMinutes?: number;
+  /**
+   * 「正在等片源」时的检查间隔（分钟）。默认 15。
+   *
+   * 只有在一集已经到点（播出 + readyDelayMinutes）却还没下到时，
+   * 才会按这个频率检查；其余时间程序会按播出安排睡到下一次该看的时候。
+   */
+  activeIntervalMinutes?: number;
+  /**
+   * 没有已知播出安排时的兜底检查间隔（分钟）。默认 180（3 小时）。
+   *
+   * 兜底是必要的：计划本身会变（用户在 Planner 里把某部番标成在看、
+   * 或者本地清单被改了），完全靠播出时间算的话，计划变了也发现不了。
+   */
+  idleIntervalMinutes?: number;
+  /**
+   * 一集播出后最多密集盯多少小时，超过就退回兜底节奏。默认 12。
+   *
+   * 有的集就是没有片源（冷门番、或者字幕组没做），一直每 15 分钟搜下去
+   * 既没用又打扰片源站；超过这个窗口就降频，等下次兜底检查再看。
+   */
+  releaseWindowHours?: number;
   /** 单次命令最多重试几轮（每轮都从磁盘进度继续）。默认 6。 */
   retryRounds?: number;
   /** 重试间隔（分钟），之后按倍数退避。默认 10。 */
@@ -219,6 +240,9 @@ const DEFAULTS: Omit<AppConfig, 'qbittorrent'> & { qbittorrent: QbittorrentConfi
     maxAttempts: 8,
     budgetMinutes: 360,
     readyDelayMinutes: 60,
+    activeIntervalMinutes: 15,
+    idleIntervalMinutes: 180,
+    releaseWindowHours: 12,
     retryRounds: 6,
     retryBackoffMinutes: 10,
     retryMaxBackoffMinutes: 120,

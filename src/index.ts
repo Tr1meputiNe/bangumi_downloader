@@ -36,7 +36,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   run           守护模式，按 intervalMinutes 定时执行 sync（Ctrl+C 退出）
   check         检查配置、Planner、片源与 qBittorrent 的连通性
   download      搜索某个关键词，挑出最合适的资源并真正下载（默认下全集）
-  auto          按 watchlist.json 自动追番：有新集就下（适合放计划任务里长期跑）
+  auto          自动追番：按播出时间安排检查，只在「该出片源」时密集跑（放计划任务里长期跑）
   verify        用种子分片哈希核对磁盘，报告「真实」下载进度（文件大小会骗人）
   summary       归纳整个下载库：有哪些番、各多少集、多大体积（日常看这个）
   preview       只搜索并打印某部番剧的候选排名（排错用）
@@ -55,6 +55,7 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --add-local         verify 时把下载目录里没记录过的内容（例如自己用别的工具下的）加进本地清单
   --no-playable       verify 时跳过「文件能不能播」抽检（文件多时更快）
   --no-planner        auto 时只读 watchlist.json，不去问 3777 的 Watch Planner
+  --force             auto 时忽略播出计划，立刻真检查一轮（计划任务不要加）
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -678,6 +679,8 @@ async function cmdAuto(
     dryRun: boolean;
     retryRounds: number;
     preferPlanner: boolean;
+    /** 忽略「播出计划」，立刻真检查一轮。 */
+    force: boolean;
   }
 ): Promise<number> {
   const path = options.watchlistFile ?? watchlistPath(configPath);
@@ -719,8 +722,16 @@ async function cmdAuto(
       dryRun: options.dryRun,
       watchlistFile: options.watchlistFile,
       retryRounds: options.retryRounds,
-      preferPlanner: options.preferPlanner
+      preferPlanner: options.preferPlanner,
+      force: options.force
     });
+
+    /*
+     * 因为「还没到该检查的时间」跳过时，日志里已经写清原因和下次时间了，
+     * 这里不要再打一遍「本轮结束：清单 0 条」——那看起来像什么都没干成。
+     */
+    if (report.skippedBySchedule) return 0;
+
     log.info(
       `本轮结束：清单 ${report.subjects} 条，检查 ${report.checked} 条，` +
         `新下载 ${report.downloaded.length} 条，跳过 ${report.skipped.length} 条`
@@ -808,6 +819,7 @@ export async function main(argv: string[]): Promise<number> {
       'add-local': { type: 'boolean', default: false },
       'no-playable': { type: 'boolean', default: false },
       'no-planner': { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -884,7 +896,9 @@ export async function main(argv: string[]): Promise<number> {
         intervalMinutes: values.interval !== undefined ? Number(values.interval) : undefined,
         dryRun: values['dry-run'] || config.download.enabled === false,
         retryRounds: resolveRetryRounds(config, values.retry, values['no-retry']),
-        preferPlanner: !values['no-planner']
+        preferPlanner: !values['no-planner'],
+        // 手动跑（含 --dry-run）就忽略播出计划：用户是明确要看「现在会下什么」
+        force: values.force || values['dry-run']
       });
     case 'run':
       return cmdRun(config, mode);

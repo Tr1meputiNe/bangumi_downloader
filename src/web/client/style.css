@@ -283,6 +283,13 @@ a:hover {
   font-weight: 600;
 }
 
+.schedule-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .stat-actions {
   display: flex;
   gap: 6px;
