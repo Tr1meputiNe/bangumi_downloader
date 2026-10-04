@@ -48,6 +48,8 @@ export type DownloadJob = {
   ratio: number | null;
   downloadedBytes: number;
   totalBytes: number | null;
+  /** 已经自动重试过几次。 */
+  retries: number;
   /** 字节/秒。 */
   speed: number;
   peers: number;
@@ -83,10 +85,16 @@ type JobDeps = {
   qbittorrent?: QbittorrentClient;
   /** config.json 的路径（跨进程去重用）。 */
   configPath?: string;
+  /** 覆盖下载实现（测试用）。 */
+  dispatch?: typeof dispatchDownload;
 };
 
 const MAX_MESSAGES = 40;
 const MAX_FINISHED_JOBS = 50;
+/** 有进度的失败最多自动重试几次（每次都会从已校验的分片接着下）。 */
+const MAX_RETRIES = 3;
+/** 自动重试前的等待，给 peer 一点轮换的时间。 */
+const RETRY_DELAY_MS = 60_000;
 
 export class JobQueue extends EventEmitter {
   #jobs = new Map<string, DownloadJob>();
@@ -119,6 +127,7 @@ export class JobQueue extends EventEmitter {
       ratio: null,
       downloadedBytes: 0,
       totalBytes: input.sizeBytes ?? null,
+      retries: 0,
       speed: 0,
       peers: 0,
       messages: [],
@@ -277,7 +286,8 @@ export class JobQueue extends EventEmitter {
 
     try {
       const hooks = jobHooks(job, (bytes) => this.#progress.set(job.id, bytes));
-      const result = await dispatchDownload(
+      const dispatch = this.#deps.dispatch ?? dispatchDownload;
+      const result = await dispatch(
         {
           config: this.#deps.config,
           configPath: this.#deps.configPath,
@@ -311,6 +321,29 @@ export class JobQueue extends EventEmitter {
         this.#note(job, '已暂停，点继续会从这里接着下');
       } else if (job.lastStop === 'cancelled') {
         this.#setStatus(job, 'cancelled');
+      } else if (this.#shouldRetry(job, message)) {
+        /*
+         * 有进度的失败先自动重试，别直接判死。
+         *
+         * 实测：6.2GB 的一集下到 95.6% 时因为「单条 1 小时上限」被放弃，
+         * 数据都在磁盘上（已校验的分片会跳过重下），只要再来一轮就能接着下完。
+         * 用户对速度没有要求，凭「挂了一次」就把 6GB 丢在一边是纯浪费。
+         * 重试次数和退避都是有限的，并且要求「这一轮确实拿到了东西」，
+         * 免得在一条彻底下不动的种子上无限打转。
+         */
+        job.retries += 1;
+        this.#note(
+          job,
+          `失败：${message} —— 已经下到 ${((job.ratio ?? 0) * 100).toFixed(1)}%，${RETRY_DELAY_MS / 1000} 秒后自动重试` +
+            `（第 ${job.retries}/${MAX_RETRIES} 次，已校验的分片不会重下）`
+        );
+        log.warn(`任务 ${job.id} 中断（${message}），${RETRY_DELAY_MS / 1000} 秒后自动重试第 ${job.retries} 次`);
+        job.error = message;
+        this.#setStatus(job, 'queued');
+        job.startedAt = null;
+        setTimeout(() => {
+          if (job.status === 'queued' && job.lastStop !== 'cancelled') void this.#drain();
+        }, RETRY_DELAY_MS);
       } else {
         this.#setStatus(job, 'failed');
         job.error = message;
@@ -326,6 +359,21 @@ export class JobQueue extends EventEmitter {
       }
       this.#trimFinished();
     }
+  }
+
+  /**
+   * 这次失败该不该自动重试。
+   *
+   * 条件：还有重试次数；这一轮至少拿到过一点数据（说明种子是活的，只是被打断了）；
+   * 用户没有主动取消/暂停。
+   */
+  #shouldRetry(job: DownloadJob, message: string): boolean {
+    if (job.retries >= MAX_RETRIES) return false;
+    if (job.lastStop === 'cancelled' || job.lastStop === 'paused') return false;
+    if (job.downloadedBytes <= 0) return false;
+    // 明显的配置/环境错误没必要重试
+    if (/没有可下载的候选|不支持|未初始化|savePath/.test(message)) return false;
+    return true;
   }
 
   #note(job: DownloadJob, message: string): void {

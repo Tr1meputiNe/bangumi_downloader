@@ -530,3 +530,36 @@ describe('核对任务：把清单里过时的位置记录改过来', () => {
     }
   });
 });
+
+describe('有进度的失败会自动重试，而不是判死', () => {
+  it('进度过半被中断 -> 回到队列并说明「不会重下已校验的分片」', async () => {
+    const { JobQueue } = await import('../src/core/jobs.js');
+    const config = {
+      download: { backend: 'builtin', savePath: '/tmp/x' },
+      qbittorrent: { savePath: '/tmp/x' }
+    } as never;
+
+    let calls = 0;
+    const queue = new JobQueue({
+      config,
+      // 第一次下到一半抛「超时」，第二次直接成功
+      dispatch: (async (deps: { onProgress?: (p: unknown) => void }) => {
+        calls += 1;
+        // 进度是通过 deps.onProgress 报回来的（不是 input）
+        deps.onProgress?.({ ratio: 0.956, downloadedBytes: 6038 * 1048576, totalBytes: 6316 * 1048576, speed: 0, peers: 0 });
+        if (calls === 1) throw new Error('下载超时或已取消（上限 3600 秒）');
+        return { files: ['/tmp/x/a.mkv'], fileCount: 1, backend: 'builtin' };
+      }) as never
+    });
+
+    queue.enqueue({ title: '测试种子', magnet: `magnet:?xt=urn:btih:${'e'.repeat(40)}` });
+    // 等第一次尝试失败并进入重试排队
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const job = queue.list()[0]!;
+    // 不该是 failed —— 用户明确说过速度无所谓，挂了就丢 6GB 是纯浪费
+    expect(job.status === 'failed').toBe(false);
+    expect(job.messages.some((line) => line.includes('自动重试'))).toBe(true);
+    expect(job.messages.some((line) => line.includes('不会重下'))).toBe(true);
+  });
+});

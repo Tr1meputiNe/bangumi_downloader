@@ -164,6 +164,8 @@ export class TorrentDownloader extends EventEmitter {
   #pipelineDepth = 64;
   /** 整次 download() 的截止时间，由 download() 设置，供各阶段共同遵守。 */
   #deadline = Number.POSITIVE_INFINITY;
+  /** 有进展时把截止时间往后推（由 download() 注入）。 */
+  #renewDeadline: (() => void) | null = null;
 
   constructor(options: DownloadOptions) {
     super();
@@ -179,21 +181,39 @@ export class TorrentDownloader extends EventEmitter {
   /**
    * 执行一次完整下载。
    *
-   * timeoutMs 是**整件事**的上限，包含找 peer、取元数据这些前期阶段。
-   * 早期版本只在数据下载的循环里检查 deadline，导致「元数据阶段卡住」时
-   * 总耗时能远超调用方给的上限（实测一个 100 秒的探测跑了十几分钟不停）。
+   * timeoutMs 的语义：**前期阶段**（找 peer、取元数据）的硬上限，
+   * 以及**长时间没有任何进展**时的兜底。它**不代表**「整件事只能跑这么久」。
+   *
+   * 这条改动的起因很具体：用户 6.2GB 的一集下到 **95.6%** 时被判
+   * 「下载超时或已取消（上限 3600 秒）」而放弃 —— 当时引擎日志明明是
+   * 「未阻塞 7、在途 block 447」，在正常下载。用户明确说过「对下载速度没有高速要求」，
+   * 那么按总时长掐断健康下载就是纯损失：慢链路下一集本来就要跑几个小时。
+   *
+   * 现在：只要还在**完成分片**，截止时间就往后顺延（每完成一个分片续 timeoutMs）；
+   * 真正卡死由 stallTimeoutMs（默认 3 分钟没有分片完成）负责判定。
    */
   async download(): Promise<DownloadResult> {
     const startedAt = Date.now();
     const timeoutMs = this.#options.timeoutMs ?? 30 * 60_000;
-    const deadline = startedAt + timeoutMs;
+    let deadline = startedAt + timeoutMs;
     this.#deadline = deadline;
+    /** 每次有新分片完成就续期（见 #sampleSpeed 里的调用）。 */
+    this.#renewDeadline = () => {
+      deadline = Date.now() + timeoutMs;
+      this.#deadline = deadline;
+    };
 
     const abort = () => this.abort();
     this.#options.signal?.addEventListener('abort', abort, { once: true });
 
-    // 一个到点就触发取消的定时器，兜住任何阶段（元数据、找 peer、调度）的长阻塞
-    const hardTimer = setTimeout(() => this.abort(), timeoutMs);
+    /*
+     * 前期阶段的兜底定时器：元数据/找 peer 阶段最长等 timeoutMs。
+     * 进入数据下载、开始有分片完成后，它就不再是「总时长上限」——
+     * 只要还在完成分片，截止时间会被 #renewDeadline 一直往后推。
+     */
+    const hardTimer = setTimeout(() => {
+      if (this.#storage === null || this.#storage.verified.size === 0) this.abort();
+    }, timeoutMs);
 
     try {
       await this.#startListener();
@@ -267,7 +287,12 @@ export class TorrentDownloader extends EventEmitter {
       while (!this.#aborted) {
         if (this.#storage.verified.size >= wanted.length) break;
 
-        if (Date.now() > deadline) throw new Error(`下载超时（${Math.round(timeoutMs / 1000)} 秒）`);
+        if (Date.now() > deadline) {
+          throw new Error(
+            `下载超时（${Math.round(timeoutMs / 1000)} 秒没有任何新分片完成，` +
+              `已下 ${this.#storage.verified.size}/${wanted.length} 片）`
+          );
+        }
         if (Date.now() - this.#lastProgressAt > stallTimeout && this.#inflight.size === 0) {
           throw new Error(`下载停滞：${Math.round(stallTimeout / 1000)} 秒没有任何分片完成`);
         }
@@ -996,6 +1021,8 @@ export class TorrentDownloader extends EventEmitter {
     this.#pieceQueues.delete(index);
     this.#rarity.delete(index);
     this.#lastProgressAt = Date.now();
+    // 还在完成分片 = 还在下，截止时间顺延（慢但能下不该被总时长掐断）
+    this.#renewDeadline?.();
 
     // 告诉别人我们有了这个 piece
     for (const other of this.#peers.values()) other.connection.send({ type: 'have', index });
