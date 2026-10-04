@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { JSDOM } from 'jsdom';
+import { createServer, type Server } from 'node:http';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,7 +25,52 @@ describeIfBuilt('界面渲染冒烟测试', () => {
   let root: string;
   let dom: JSDOM;
 
+  let planner: Server | null = null;
+  let plannerUrl = '';
+
   beforeAll(async () => {
+    // 一个只有一集的假 Planner：计划表要有数据才能验证「按播出时间排」
+    planner = createServer((request, response) => {
+      const send = (payload: unknown) => {
+        const body = JSON.stringify(payload);
+        response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+        response.end(body);
+      };
+      const subject = {
+        id: 1,
+        name: 'Fake Show',
+        nameCn: '测试番剧',
+        eps: 12,
+        epStatus: 1,
+        collectionType: 3,
+        image: null,
+        airDate: null,
+        unwatchedMainEpisodeCount: 1,
+        nextEpisode: {
+          id: 11,
+          subjectId: 1,
+          subjectName: 'Fake Show',
+          subjectNameCn: '测试番剧',
+          episodeType: 0,
+          sort: 8,
+          ep: 8,
+          name: 'ep 8',
+          nameCn: '第 8 集',
+          airdate: '2099-01-02',
+          airTime: '21:30',
+          collectionType: 0
+        }
+      };
+      if ((request.url ?? '').startsWith('/api/dashboard')) {
+        send({ pendingEpisodes: [], subjects: [subject], lastSyncAt: null, lastError: null });
+        return;
+      }
+      send({ episodes: [] });
+    });
+    await new Promise<void>((resolve) => planner?.listen(0, '127.0.0.1', resolve));
+    const address = planner.address();
+    plannerUrl = `http://127.0.0.1:${address !== null && typeof address === 'object' ? address.port : 0}`;
+
     root = mkdtempSync(join(tmpdir(), 'ui-'));
     const seriesRoot = join(root, '番剧');
     mkdirSync(join(seriesRoot, '测试番剧'), { recursive: true });
@@ -39,7 +85,7 @@ describeIfBuilt('界面渲染冒烟测试', () => {
       JSON.stringify({
         web: { port: 0, host: '127.0.0.1', openBrowser: false },
         download: { backend: 'builtin', savePath: root, seriesDir: '番剧' },
-        plannerBaseUrl: 'http://127.0.0.1:9'
+        plannerBaseUrl: plannerUrl
       }),
       'utf8'
     );
@@ -65,6 +111,7 @@ describeIfBuilt('界面渲染冒烟测试', () => {
   afterAll(async () => {
     dom?.window.close();
     await started?.close();
+    await new Promise<void>((resolve) => (planner ? planner.close(() => resolve()) : resolve()));
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -125,6 +172,13 @@ describeIfBuilt('界面渲染冒烟测试', () => {
     expect(text).toContain('下一集找第 4 集');
     // 计划页要能回答「下次什么时候检查」
     expect(text).toContain('下次检查');
+
+    // 计划表：按播出时间排、每行给出「该取片源」的时刻和状态
+    const rows = document.querySelectorAll('.plan-row');
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.textContent).toContain('测试番剧');
+    expect(rows[0]?.textContent).toContain('等播出');
+    expect(text).toContain('接下来的安排（按播出时间排）');
   });
 
   it('片库页列出条目，点开后能看到文件', async () => {
