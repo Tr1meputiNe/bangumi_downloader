@@ -224,9 +224,26 @@ export type WatchEntryView = {
   enabled: boolean;
 };
 
+export type PlanRowStatus = 'done' | 'waiting' | 'upcoming' | 'stale' | 'unknown';
+
+/** 计划表的一行：某部番的下一集，按播出时间排。 */
+export type PlanRow = {
+  subjectId: number;
+  name: string;
+  episode: number | null;
+  airdate: string;
+  airTime: string | null;
+  broadcastAt: string | null;
+  readyAt: string | null;
+  until: string | null;
+  status: PlanRowStatus;
+  statusText: string;
+};
+
 export type AutoScheduleView = {
   file: string | null;
   nextCheckAt: string | null;
+  nextRefreshAt: string | null;
   nextReason: string;
   /** 服务端算好的「多久之后」说法，例如「3 小时后（10-04 19:00）」。 */
   nextCheckText: string;
@@ -236,6 +253,10 @@ export type AutoScheduleView = {
   activeIntervalMinutes: number;
   idleIntervalMinutes: number;
   releaseWindowHours: number;
+  /** 按播出时间升序排好的计划表。 */
+  rows: PlanRow[];
+  /** 服务端算这张表时的时间。 */
+  now: string;
 };
 
 export type WatchlistResponse = {
@@ -399,6 +420,7 @@ export const api = {
   status: () => request<StatusResponse>('/api/status'),
   overview: () => request<OverviewResponse>('/api/overview'),
   schedule: () => request<ScheduleResponse>('/api/schedule'),
+  scheduleSync: () => post<{ ok: boolean; message: string; count?: number; nextRun?: string | null }>('/api/schedule/sync', {}),
   search: (query: string, refresh = false) =>
     request<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}${refresh ? '&refresh=1' : ''}`),
   add: (items: unknown[]) => post<AddResponse>('/api/add', { items }),

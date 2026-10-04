@@ -9,7 +9,15 @@ import { JobQueue } from '../core/jobs.js';
 import { collectLibrary } from '../core/summary.js';
 import { displayName, PlannerClient, type PlannerSubject } from '../planner/client.js';
 import { loadWatchlist, nextEpisodeOf, removeWatchEntry, upsertWatchEntry, watchlistPath, type WatchEntry } from '../core/watchlist.js';
-import { autoSchedulePath, describeNextCheck, loadAutoSchedule, type AutoScheduleState } from '../core/auto-schedule.js';
+import { buildTaskSchedule, syncTaskSchedule } from '../core/task-schedule.js';
+import {
+  autoSchedulePath,
+  buildPlanRows,
+  describeNextCheck,
+  doneKeys,
+  loadAutoSchedule,
+  type AutoScheduleState
+} from '../core/auto-schedule.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -112,6 +120,7 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
   if (method === 'GET' && path === '/api/status') return sendJson(response, 200, await buildStatus(deps));
   if (method === 'GET' && path === '/api/overview') return sendJson(response, 200, await buildOverview(deps));
   if (method === 'GET' && path === '/api/schedule') return sendJson(response, 200, await probeScheduledTasks());
+  if (method === 'POST' && path === '/api/schedule/sync') return handleScheduleSync(deps, request, response);
 
   /* ---------------- 搜索与下载 ---------------- */
   if (method === 'GET' && path === '/api/search') return handleSearch(deps, url, response);
@@ -276,6 +285,53 @@ async function buildOverview(deps: WebDeps) {
     })(),
     schedule
   };
+}
+
+/**
+ * 按最新计划重排计划任务的触发器。
+ *
+ * 界面上给一个按钮：改完 Planner、或者在设置里调了间隔之后，
+ * 想让任务计划程序立刻按新安排来，不用等下一轮跑完。
+ */
+async function handleScheduleSync(deps: WebDeps, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  let body: { taskName?: unknown } = {};
+  try {
+    const text = await readBody(request);
+    if (text.trim() !== '') body = JSON.parse(text) as { taskName?: unknown };
+  } catch {
+    return sendJson(response, 400, { error: '请求体不是合法 JSON' });
+  }
+
+  const current = currentAutoSchedule(deps);
+  if (!current.state || current.state.triggers.length === 0) {
+    return sendJson(response, 409, {
+      error: '计划里还没有播出安排（先让自动追番跑一轮；或者 Planner 里没有「在看」的番）'
+    });
+  }
+
+  const now = new Date();
+  const taskPlan = buildTaskSchedule(
+    {
+      triggers: current.state.triggers.map((item) => ({
+        start: new Date(item.start),
+        until: new Date(item.until),
+        label: item.label
+      }))
+    },
+    now,
+    {
+      activeIntervalMinutes: deps.config.download.activeIntervalMinutes ?? 15,
+      idleIntervalMinutes: deps.config.download.idleIntervalMinutes ?? 180
+    }
+  );
+
+  const result = await syncTaskSchedule({
+    taskName: typeof body.taskName === 'string' && body.taskName !== '' ? body.taskName : 'BangumiDownloader',
+    plan: taskPlan,
+    apply: true
+  });
+
+  sendJson(response, result.ok ? 200 : 500, result);
 }
 
 /* ================================================================== *
@@ -775,9 +831,27 @@ async function buildWatchlist(deps: WebDeps) {
     planner,
     schedule: (() => {
       const current = currentAutoSchedule(deps);
+      const now = new Date();
+      const rows = buildPlanRows(
+        planner.subjects.map((subject) => ({
+          subjectId: subject.id,
+          name: subject.display,
+          next: subject.nextEpisode
+            ? { ep: subject.nextEpisode.ep, airdate: subject.nextEpisode.airdate, airTime: subject.nextEpisode.airTime ?? null }
+            : null
+        })),
+        now,
+        {
+          readyDelayMinutes: deps.config.download.readyDelayMinutes ?? 60,
+          releaseWindowHours: deps.config.download.releaseWindowHours ?? 12
+        },
+        doneKeys(current.state)
+      );
+
       return {
         file: current.file,
         nextCheckAt: current.state?.nextCheckAt ?? null,
+        nextRefreshAt: current.state?.nextRefreshAt ?? null,
         nextReason: current.state?.nextReason ?? '',
         nextCheckText: current.nextCheckText,
         updatedAt: current.state?.updatedAt ?? null,
@@ -785,7 +859,10 @@ async function buildWatchlist(deps: WebDeps) {
         doneCount: current.state?.done.length ?? 0,
         activeIntervalMinutes: deps.config.download.activeIntervalMinutes ?? 15,
         idleIntervalMinutes: deps.config.download.idleIntervalMinutes ?? 180,
-        releaseWindowHours: deps.config.download.releaseWindowHours ?? 12
+        releaseWindowHours: deps.config.download.releaseWindowHours ?? 12,
+        /** 按播出时间升序排好的计划表。 */
+        rows,
+        now: now.toISOString()
       };
     })(),
     download: {

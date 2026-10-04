@@ -1,9 +1,41 @@
 import { useCallback, useEffect, useState } from 'preact/hooks';
 import { html } from '../html.js';
-import { api, type ScheduleResponse, type WatchEntryView, type WatchlistResponse } from '../api.js';
+import { api, type PlanRow, type ScheduleResponse, type WatchEntryView, type WatchlistResponse } from '../api.js';
 import { Badge, Card, Empty, ProgressBar, Spinner, StatusDot } from '../components.js';
 import { compactEpisodes, formatClock, relativeTime, shortenPath } from '../format.js';
 import { notify, refreshNow, useStore } from '../store.js';
+
+const PLAN_ROW_BADGE: Record<PlanRow['status'], string> = {
+  done: 'ok',
+  waiting: 'ok',
+  upcoming: '',
+  stale: 'warn',
+  unknown: ''
+};
+
+/** ISO → 「10-08 21:56」。 */
+function formatClockText(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 每一行再补一句「接下来会怎样」。 */
+function plainStatusHint(row: PlanRow, activeIntervalMinutes: number): string {
+  switch (row.status) {
+    case 'done':
+      return '已下过，不再重复搜';
+    case 'waiting':
+      return `每 ${activeIntervalMinutes} 分钟看一次`;
+    case 'upcoming':
+      return '还没播，到点自动开始';
+    case 'stale':
+      return '一直没片源，已降频';
+    default:
+      return 'Planner 没给播出时刻';
+  }
+}
 
 /** 180 → 「3 小时」，90 → 「1 小时 30 分」。 */
 function formatIdle(minutes: number | undefined): string {
@@ -93,6 +125,20 @@ export function PlanView() {
     [form]
   );
 
+  /** 把最新计划写进计划任务的触发器。 */
+  const syncTask = useCallback(async () => {
+    setBusy(true);
+    try {
+      const result = await api.scheduleSync();
+      notify(result.ok ? 'ok' : 'err', `${result.message}${result.nextRun ? `（下次 ${result.nextRun}）` : ''}`);
+      await load();
+    } catch (err) {
+      notify('err', err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [load]);
+
   const remove = useCallback(
     async (entry: WatchEntryView) => {
       if (!window.confirm(`从追番清单里删掉《${entry.query}》？（已下载的文件不会被删除）`)) return;
@@ -159,6 +205,48 @@ export function PlanView() {
                     <div class="dim small">${data.schedule.nextReason}</div>
                   `
                 : null}
+              ${data?.schedule && data.schedule.rows.length > 0
+                ? html`
+                    <div class="plan-table-wrap">
+                      <div class="sub-head">接下来的安排（按播出时间排）</div>
+                      <div class="plan-table">
+                        <div class="plan-head">
+                          <span>播出</span>
+                          <span>番剧</span>
+                          <span>集</span>
+                          <span>该取片源</span>
+                          <span>状态</span>
+                        </div>
+                        ${data.schedule.rows.map(
+                          (row: PlanRow) => html`
+                            <div class=${`plan-row ${row.status}`}>
+                              <span class="mono small">
+                                ${row.broadcastAt
+                                  ? html`${formatClockText(row.broadcastAt)}`
+                                  : html`${row.airdate || '—'}`}
+                              </span>
+                              <span class="ellipsis" title=${row.name}>${row.name}</span>
+                              <span class="mono small">${row.episode ?? '?'}</span>
+                              <span class="mono small dim">${row.readyAt ? formatClockText(row.readyAt) : '—'}</span>
+                              <span>
+                                <${Badge} kind=${PLAN_ROW_BADGE[row.status]}>${row.statusText}</${Badge}>
+                                <span class="dim small"> ${plainStatusHint(row, data.schedule.activeIntervalMinutes)}</span>
+                              </span>
+                            </div>
+                          `
+                        )}
+                      </div>
+                      <div class="dim small">
+                        这张表就是自动追番的计划：到「该取片源」那一刻才开始搜种，
+                        在此之前最多每 ${formatIdle(data.schedule.idleIntervalMinutes)} 重读一遍计划
+                        ${data.schedule.nextRefreshAt
+                          ? html`（下次 ${formatClockText(data.schedule.nextRefreshAt)}）`
+                          : null}。
+                      </div>
+                    </div>
+                  `
+                : null}
+
               <div class="kv-grid">
                 <div><span class="dim">下载目录</span><div class="mono small">${data?.download.savePath ?? '—'}</div></div>
                 <div><span class="dim">片源就绪延迟</span><div>播出后 ${data?.download.readyDelayMinutes ?? '—'} 分钟才开始找</div></div>
@@ -176,8 +264,21 @@ export function PlanView() {
 
       <${Card}
         title="计划任务"
-        hint=${schedule?.ok ? '由 Windows 任务计划程序触发，开机自启并定期自愈' : schedule?.message ?? ''}
-        actions=${html`<button type="button" class="ghost small" onClick=${() => void load()}>刷新</button>`}
+        hint=${schedule?.ok
+          ? '由 Windows 任务计划程序触发；「自动追番」那个已经按播出时间重排过，只剩低频的「重读计划」'
+          : schedule?.message ?? ''}
+        actions=${html`
+          <button type="button" class="ghost small" onClick=${() => void load()}>刷新</button>
+          <button
+            type="button"
+            class="ghost small"
+            disabled=${busy || !data?.schedule || data.schedule.rows.length === 0}
+            title="按最新播出安排重写 BangumiDownloader 的触发器"
+            onClick=${() => void syncTask()}
+          >
+            按播出时间重排
+          </button>
+        `}
       >
         ${schedule?.ok
           ? html`

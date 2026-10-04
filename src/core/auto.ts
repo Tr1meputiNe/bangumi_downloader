@@ -10,6 +10,7 @@ import {
   type WatchEntry
 } from './watchlist.js';
 import { PlannerClient, displayName, type AnimeGap } from '../planner/client.js';
+import { buildTaskSchedule, syncTaskSchedule, type SyncResult } from './task-schedule.js';
 import {
   applyPlan,
   autoSchedulePath,
@@ -73,6 +74,16 @@ export type AutoOptions = {
   force?: boolean;
   /** 关掉计划判断（调试用：等价于永远 force）。 */
   respectSchedule?: boolean;
+  /**
+   * 顺手把「什么时候检查」写进 Windows 计划任务的触发器（默认关）。
+   *
+   * 打开之后，任务计划程序本身就是按播出时间触发的：播出前后那段时间每 15 分钟
+   * 一次，其余时间只有「重读计划」的低频触发。计划任务里的命令加上 `--sync-task`
+   * 即可（install-startup.ps1 已经这么写了）。
+   */
+  syncTask?: boolean;
+  /** 要同步的计划任务名，默认 BangumiDownloader。 */
+  taskName?: string;
   /** 当前时间（测试注入用）。 */
   now?: Date;
 };
@@ -90,10 +101,14 @@ export type AutoReport = {
   source: 'planner' | 'watchlist';
   downloaded: Array<{ query: string; episodes: number[]; files: number; completed: boolean; bytesWritten: number }>;
   skipped: Array<{ query: string; reason: string }>;
-  /** 因为「还没到该检查的时间」整轮跳过（没有任何网络请求）。 */
+  /** 因为「还没到播出的检查时间」整轮没干活。 */
   skippedBySchedule?: boolean;
+  /** 没干活的那一轮具体做了什么：只刷新了计划（refresh）还是连请求都没发（skip）。 */
+  mode?: 'run' | 'refresh' | 'skip';
   /** 本轮之后安排的下次检查，界面上直接显示。 */
   schedule?: { nextCheckAt: string | null; reason: string; due: boolean };
+  /** 计划任务触发器的同步结果（只有开了 syncTask 才有）。 */
+  taskSync?: SyncResult;
 };
 
 /** 跑一轮：对清单里每一部番，找出「还没下的集」并下载。 */
@@ -121,19 +136,30 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
 
   if (respectSchedule && options.configPath) {
     const decision = decideRun(state, now, { force: false });
-    if (!decision.run) {
-      /*
-       * 跳过的日志只在「原因变了」的时候打一遍。
-       * 每 15 分钟写一行同样的字会把日志刷满，真正的问题反而被埋掉。
-       */
+
+    /*
+     * 到点之前的两件事分开处理：
+     *   refresh —— 只重算计划（问一次 Planner，不搜种、不下载）
+     *   skip    —— 连请求都不发
+     * 日志只在「原因变了」的时候打一遍：每 15 分钟写一行同样的字会把日志刷满，
+     * 真正的问题反而被埋掉。
+     */
+    if (decision.action !== 'run') {
       const changed = state?.lastSkipReason !== decision.reason;
       if (changed) log.info(decision.reason);
       else log.debug(decision.reason);
 
-      if (state && state.lastSkipReason !== decision.reason) {
-        state.lastSkipReason = decision.reason;
-        saveAutoSchedule(schedulePath, state);
+      const updated = state ?? loadAutoSchedule(schedulePath, now);
+      let taskSync: SyncResult | undefined;
+      if (decision.action === 'refresh') {
+        const plan = await computePlan(options, { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'planner' }, now);
+        applyPlan(updated, plan, now);
+        log.info(`计划已刷新，下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
+        taskSync = await maybeSyncTask(options, plan, now);
       }
+
+      updated.lastSkipReason = decision.reason;
+      saveAutoSchedule(schedulePath, updated);
 
       return {
         subjects: 0,
@@ -142,7 +168,9 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
         skipped: [],
         source: 'planner',
         skippedBySchedule: true,
-        schedule: { nextCheckAt: state?.nextCheckAt ?? null, reason: state?.nextReason ?? decision.reason, due: false }
+        mode: decision.action,
+        schedule: { nextCheckAt: updated.nextCheckAt, reason: updated.nextReason, due: false },
+        taskSync
       };
     }
     log.info(`开始检查：${decision.reason}`);
@@ -161,12 +189,34 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
 
     report.schedule = { nextCheckAt: plan.nextCheckAt.toISOString(), reason: plan.reason, due: plan.due };
     log.info(`下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
+    report.taskSync = await maybeSyncTask(options, plan, now);
     for (const item of plan.stale.slice(0, 5)) {
       log.debug(`《${item.query}》第 ${item.episode ?? '?'} 集播出已久仍没找到片源，本集不再密集检查`);
     }
   }
 
   return report;
+}
+
+/**
+ * 按播出时间重排 Windows 计划任务的触发器。
+ *
+ * 为什么放在程序里而不是安装脚本里：播出安排每周都在变，
+ * 只在安装时排一次的话第二天就不准了。每次跑完顺手重排一次最省心。
+ */
+async function maybeSyncTask(options: AutoOptions, plan: SchedulePlan, now: Date): Promise<SyncResult | undefined> {
+  if (options.syncTask !== true) return undefined;
+
+  const taskPlan = buildTaskSchedule(plan, now, {
+    activeIntervalMinutes: options.config.download.activeIntervalMinutes ?? 15,
+    idleIntervalMinutes: options.config.download.idleIntervalMinutes ?? 180
+  });
+
+  return await syncTaskSchedule({
+    taskName: options.taskName ?? 'BangumiDownloader',
+    plan: taskPlan,
+    apply: true
+  });
 }
 
 /** 真正干活的两种数据来源。 */

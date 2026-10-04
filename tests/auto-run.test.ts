@@ -187,8 +187,10 @@ function writeSchedule(h: Harness, patch: Partial<AutoScheduleState>): void {
     version: 1,
     updatedAt: new Date().toISOString(),
     nextCheckAt: null,
+    nextRefreshAt: null,
     nextReason: '',
     windows: [],
+    triggers: [],
     done: [],
     lastSkipReason: null
   };

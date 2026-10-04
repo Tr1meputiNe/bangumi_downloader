@@ -50,12 +50,22 @@ export type AutoDoneRecord = {
 export type AutoScheduleState = {
   version: 1;
   updatedAt: string;
-  /** 下次该检查的时刻（ISO）；null 表示还没算出来。 */
+  /** 下次该**真干活**的时刻（ISO）—— 完全由播出时间决定；null 表示还没算出来。 */
   nextCheckAt: string | null;
+  /**
+   * 下次**重新读一遍计划**的时刻（ISO）。
+   *
+   * 和 nextCheckAt 是两件事：计划本身会变（在 Planner 里加了新番、改了在看状态），
+   * 但盯着「播出时间」的时候没有任何理由定期去搜片源站。
+   * 所以到点之前只做「问一次 Planner、重算计划」，绝不搜种、绝不下东西。
+   */
+  nextRefreshAt: string | null;
   /** 为什么安排在这个时刻（给人看的一句话）。 */
   nextReason: string;
   /** 当前活跃的等待窗口。 */
   windows: AutoWindow[];
+  /** 排给计划任务的触发窗口（ISO），界面上的「重排计划任务」直接用它。 */
+  triggers: Array<{ start: string; until: string; label: string }>;
   /** 已经下完的集。 */
   done: AutoDoneRecord[];
   /** 上一次跳过的原因，用来避免每次都往日志里写同一行。 */
@@ -75,8 +85,10 @@ export function emptyScheduleState(now: Date): AutoScheduleState {
     version: 1,
     updatedAt: now.toISOString(),
     nextCheckAt: null,
+    nextRefreshAt: null,
     nextReason: '还没有跑过，先执行一轮再算计划',
     windows: [],
+    triggers: [],
     done: [],
     lastSkipReason: null
   };
@@ -90,8 +102,12 @@ export function loadAutoSchedule(path: string, now: Date = new Date()): AutoSche
       version: 1,
       updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : now.toISOString(),
       nextCheckAt: typeof raw.nextCheckAt === 'string' ? raw.nextCheckAt : null,
+      nextRefreshAt: typeof raw.nextRefreshAt === 'string' ? raw.nextRefreshAt : null,
       nextReason: typeof raw.nextReason === 'string' ? raw.nextReason : '',
       windows: Array.isArray(raw.windows) ? (raw.windows as AutoWindow[]).filter((item) => typeof item?.readyAt === 'string') : [],
+      triggers: Array.isArray(raw.triggers)
+        ? (raw.triggers as AutoScheduleState['triggers']).filter((item) => typeof item?.start === 'string')
+        : [],
       done: Array.isArray(raw.done)
         ? (raw.done as AutoDoneRecord[]).filter((item) => typeof item?.at === 'string' && typeof item?.query === 'string')
         : [],
@@ -117,25 +133,35 @@ export function saveAutoSchedule(path: string, state: AutoScheduleState): void {
  * 判断「现在要不要跑」
  * ------------------------------------------------------------------ */
 
-export type RunDecision = { run: boolean; reason: string };
-
 /**
- * 现在该不该真干活。
+ * 这一轮该做什么。
  *
- * 刻意**失败开**：计划文件缺失、损坏、时间不合法时都返回「跑」——
+ *   run     真干活（搜片源、下载）—— 只在播出时间到点之后
+ *   refresh 只重算计划（问一次 Planner，不搜种、不下载）—— 到点之前定期确认计划有没有变
+ *   skip    什么都不做，连请求都不发
+ *
+ * 刻意**失败开**：计划文件缺失、损坏、时间不合法时都返回 run ——
  * 宁可多跑一轮，也不要因为一个坏掉的 json 让追番彻底停摆。
  */
+export type RunDecision = { action: 'run' | 'refresh' | 'skip'; reason: string };
+
 export function decideRun(state: AutoScheduleState | null, now: Date, options: { force?: boolean } = {}): RunDecision {
-  if (options.force) return { run: true, reason: '手动触发，忽略计划' };
-  if (!state || state.nextCheckAt === null) return { run: true, reason: '还没有计划记录，先跑一轮' };
+  if (options.force) return { action: 'run', reason: '手动触发，忽略计划' };
+  if (!state || state.nextCheckAt === null) return { action: 'run', reason: '还没有计划记录，先跑一轮' };
 
   const next = new Date(state.nextCheckAt);
-  if (Number.isNaN(next.getTime())) return { run: true, reason: '计划里的时间不合法，先跑一轮' };
+  if (Number.isNaN(next.getTime())) return { action: 'run', reason: '计划里的时间不合法，先跑一轮' };
   if (now.getTime() >= next.getTime()) {
-    return { run: true, reason: `到点了：${state.nextReason || '计划里安排的检查时间已到'}` };
+    return { action: 'run', reason: `到点了：${state.nextReason || '计划里安排的检查时间已到'}` };
   }
+
+  const refresh = state.nextRefreshAt === null ? null : new Date(state.nextRefreshAt);
+  if (refresh && !Number.isNaN(refresh.getTime()) && now.getTime() >= refresh.getTime()) {
+    return { action: 'refresh', reason: `到点前只刷新计划（下次干活安排在 ${formatClock(next)}）` };
+  }
+
   return {
-    run: false,
+    action: 'skip',
     reason: `未到检查时间，本轮跳过 —— ${state.nextReason}（安排在 ${formatClock(next)}）`
   };
 }
@@ -166,8 +192,19 @@ export type PlanOptions = {
 export type SchedulePlan = {
   /** 现在就有窗口到点 —— 该干活了。 */
   due: boolean;
+  /** 下次真干活的时刻：**完全由播出时间决定**。 */
   nextCheckAt: Date;
+  /** 下次重读计划的时刻（只看计划变没变，不搜片源）。 */
+  nextRefreshAt: Date;
   reason: string;
+  /**
+   * 「哪几段时间需要盯着」——直接用来排 Windows 计划任务的触发器。
+   *
+   * 每一段是 [start, until]：到 start 开始每 activeInterval 分钟看一次，
+   * 到 until 还没下到就放过这一集。计划任务本身按这个排，就不用靠
+   * 「每 15 分钟无脑触发 + 程序自己判断要不要干」了。
+   */
+  triggers: Array<{ start: Date; until: Date; label: string }>;
   windows: AutoWindow[];
   /** 播出很久还没下到的（本轮不再密集检查）。 */
   stale: Array<{ query: string; episode: number | null; broadcastAt: string | null }>;
@@ -203,6 +240,7 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
 
   const windows: AutoWindow[] = [];
   const future: Array<{ at: Date; label: string }> = [];
+  const triggers: SchedulePlan['triggers'] = [];
   const stale: SchedulePlan['stale'] = [];
 
   for (const subject of subjects) {
@@ -222,6 +260,7 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
         at: readyAt,
         label: `《${subject.name}》${episodeText} ${broadcastText} 播出，${formatClock(readyAt)} 之后开始找片源`
       });
+      triggers.push({ start: readyAt, until, label: `《${subject.name}》${episodeText}` });
       continue;
     }
 
@@ -234,6 +273,12 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
         readyAt: readyAt.toISOString(),
         until: until.toISOString()
       });
+      // 已经在窗口里：触发器从现在开始（下一分钟），别等到明天
+      triggers.push({
+        start: new Date(now.getTime() + 60_000),
+        until,
+        label: `《${subject.name}》${episodeText}`
+      });
       continue;
     }
 
@@ -244,6 +289,7 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
   future.sort((a, b) => a.at.getTime() - b.at.getTime());
   const nearest = future[0];
 
+  // 有集到点了：活跃窗口，每 activeInterval 分钟干一次活
   if (windows.length > 0) {
     const names = windows
       .slice(0, 3)
@@ -252,33 +298,44 @@ export function planSchedule(subjects: readonly SubjectNext[], now: Date, option
     return {
       due: true,
       nextCheckAt: new Date(now.getTime() + activeInterval * 60_000),
+      nextRefreshAt: new Date(now.getTime() + activeInterval * 60_000),
       reason:
         `${windows.length} 集已经到点、正在等片源（${names}${windows.length > 3 ? ' 等' : ''}），` +
         `每 ${activeInterval} 分钟看一次`,
       windows,
-      stale
+      stale,
+      triggers: triggers.sort((a, b) => a.start.getTime() - b.start.getTime())
     };
   }
 
-  if (nearest && nearest.at.getTime() < idleAt.getTime()) {
+  /*
+   * 没有集到点：**下一次干活就安排在下一集的播出时间上**，中间不搜片源。
+   *
+   * 这和原来「每 idleInterval 分钟检查一次」是两回事：那时候每一轮都可能去搜种，
+   * 现在中间的轮次只重算计划（问一次 Planner），真正的检查精确落在播出时刻。
+   * idleInterval 只用来决定「多久重读一遍计划」—— 计划变了（新加了番）
+   * 最多这么久就会被发现。
+   */
+  if (nearest) {
     return {
       due: false,
       nextCheckAt: nearest.at,
+      nextRefreshAt: new Date(Math.min(idleAt.getTime(), nearest.at.getTime())),
       reason: nearest.label,
       windows,
-      stale
+      stale,
+      triggers: triggers.sort((a, b) => a.start.getTime() - b.start.getTime())
     };
   }
 
   return {
     due: false,
     nextCheckAt: idleAt,
-    reason:
-      nearest === undefined
-        ? `没有已知的播出安排，先按${formatMinutes(idleInterval)}的节奏确认计划有没有变`
-        : `${nearest.label}（还早，中间按${formatMinutes(idleInterval)}的节奏确认计划）`,
+    nextRefreshAt: idleAt,
+    reason: `没有已知的播出安排，先按${formatMinutes(idleInterval)}的节奏确认计划有没有变`,
     windows,
-    stale
+    stale,
+    triggers: []
   };
 }
 
@@ -299,6 +356,7 @@ export function planWithoutPlanner(
 ): SchedulePlan {
   const idleInterval = Math.max(1, options.idleIntervalMinutes);
   const idleAt = new Date(now.getTime() + idleInterval * 60_000);
+  const windowMs = Math.max(1, options.releaseWindowHours) * 3_600_000;
 
   // 上次下到的时间 + 一周（提前一小时开始盯）
   let estimate: Date | null = null;
@@ -311,20 +369,24 @@ export function planWithoutPlanner(
     return {
       due: false,
       nextCheckAt: estimate,
+      nextRefreshAt: new Date(Math.min(idleAt.getTime(), estimate.getTime())),
       reason: `连不上 Planner；《${lastDownload?.query ?? '上次那部'}》上次是 ${formatClock(new Date(lastDownload?.at ?? ''))} 下到的，按一周一集估下次在 ${formatClock(estimate)} 前后`,
       windows: [],
-      stale: []
+      stale: [],
+      triggers: [{ start: estimate, until: new Date(estimate.getTime() + windowMs), label: `《${lastDownload?.query ?? '上次那部'}》下一集（估算）` }]
     };
   }
 
   return {
     due: false,
     nextCheckAt: idleAt,
+    nextRefreshAt: idleAt,
     reason: estimate
       ? `连不上 Planner；按一周一集估下次在 ${formatClock(estimate)} 前后，中间先按${formatMinutes(idleInterval)}的节奏确认计划`
       : `连不上 Planner，也没有可参考的下载记录，先按${formatMinutes(idleInterval)}的节奏兜底`,
     windows: [],
-    stale: []
+    stale: [],
+    triggers: []
   };
 }
 
@@ -381,8 +443,14 @@ export function pruneDone(state: AutoScheduleState, now: Date, retentionDays = 6
 export function applyPlan(state: AutoScheduleState, plan: SchedulePlan, now: Date): AutoScheduleState {
   state.updatedAt = now.toISOString();
   state.nextCheckAt = plan.nextCheckAt.toISOString();
+  state.nextRefreshAt = plan.nextRefreshAt.toISOString();
   state.nextReason = plan.reason;
   state.windows = plan.windows;
+  state.triggers = plan.triggers.map((item) => ({
+    start: item.start.toISOString(),
+    until: item.until.toISOString(),
+    label: item.label
+  }));
   return state;
 }
 
@@ -418,4 +486,95 @@ export function describeNextCheck(state: AutoScheduleState, now: Date = new Date
   const hours = Math.floor(diffMinutes / 60);
   if (hours < 24) return `${hours} 小时后（${formatClock(next)}）`;
   return `${Math.floor(hours / 24)} 天后（${formatClock(next)}）`;
+}
+
+/* ------------------------------------------------------------------ *
+ * 按播出时间排出来的计划表（界面上的「计划」页就是它）
+ * ------------------------------------------------------------------ */
+
+export type PlanRowStatus = 'done' | 'waiting' | 'upcoming' | 'stale' | 'unknown';
+
+export type PlanRow = {
+  subjectId: number;
+  name: string;
+  episode: number | null;
+  /** Planner 给的原始播出日期与时刻。 */
+  airdate: string;
+  airTime: string | null;
+  /** 播出时刻（ISO），算不出来时为 null。 */
+  broadcastAt: string | null;
+  /** 从这一刻起该有片源了。 */
+  readyAt: string | null;
+  /** 超过这一刻还没下到就不再多盯。 */
+  until: string | null;
+  status: PlanRowStatus;
+  statusText: string;
+};
+
+const STATUS_TEXT: Record<PlanRowStatus, string> = {
+  done: '已下完',
+  waiting: '正在等片源',
+  upcoming: '等播出',
+  stale: '播出已久仍无片源',
+  unknown: '时间未知'
+};
+
+/**
+ * 把「这部番下一集」排成一张按播出时间升序的表。
+ *
+ * 为什么不按番名或按状态排：这张表回答的是「接下来会发生什么」，
+ * 唯一的自然顺序就是时间轴 —— 下一集什么时候播、什么时候去取，
+ * 一眼从上往下看就是了。
+ */
+export function buildPlanRows(
+  subjects: readonly SubjectNext[],
+  now: Date,
+  options: { readyDelayMinutes: number; releaseWindowHours: number },
+  done: ReadonlySet<string> = new Set()
+): PlanRow[] {
+  const readyDelayMs = Math.max(0, options.readyDelayMinutes) * 60_000;
+  const windowMs = Math.max(1, options.releaseWindowHours) * 3_600_000;
+
+  const rows: PlanRow[] = subjects.map((subject) => {
+    const next = subject.next;
+    const base = {
+      subjectId: subject.subjectId,
+      name: subject.name,
+      episode: next?.ep ?? null,
+      airdate: next?.airdate ?? '',
+      airTime: next?.airTime ?? null
+    };
+
+    if (!next) return { ...base, broadcastAt: null, readyAt: null, until: null, status: 'unknown' as const, statusText: STATUS_TEXT.unknown };
+
+    const broadcast = broadcastTimeOf(next.airdate, next.airTime);
+    if (!broadcast) return { ...base, broadcastAt: null, readyAt: null, until: null, status: 'unknown' as const, statusText: STATUS_TEXT.unknown };
+
+    const readyAt = new Date(broadcast.getTime() + readyDelayMs);
+    const until = new Date(broadcast.getTime() + windowMs);
+    const isDone = next.ep !== null && done.has(doneKey(subject.subjectId, next.ep));
+
+    let status: PlanRowStatus;
+    if (isDone) status = 'done';
+    else if (now.getTime() < readyAt.getTime()) status = 'upcoming';
+    else if (now.getTime() <= until.getTime()) status = 'waiting';
+    else status = 'stale';
+
+    return {
+      ...base,
+      broadcastAt: broadcast.toISOString(),
+      readyAt: readyAt.toISOString(),
+      until: until.toISOString(),
+      status,
+      statusText: STATUS_TEXT[status]
+    };
+  });
+
+  // 时间升序；算不出时间的排在最后（它们没法参与时间轴）
+  return rows.sort((a, b) => {
+    if (a.broadcastAt === null && b.broadcastAt === null) return a.name.localeCompare(b.name);
+    if (a.broadcastAt === null) return 1;
+    if (b.broadcastAt === null) return -1;
+    return a.broadcastAt < b.broadcastAt ? -1 : a.broadcastAt > b.broadcastAt ? 1 : 0;
+  });
 }

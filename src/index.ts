@@ -56,6 +56,8 @@ const HELP = `bangumi-downloader —— 番剧资源搜索 + 自动追番，推�
   --no-playable       verify 时跳过「文件能不能播」抽检（文件多时更快）
   --no-planner        auto 时只读 watchlist.json，不去问 3777 的 Watch Planner
   --force             auto 时忽略播出计划，立刻真检查一轮（计划任务不要加）
+  --sync-task         auto 时顺手把「什么时候检查」写进计划任务的触发器
+  --task-name <名>    要同步的计划任务名，默认 BangumiDownloader
   --port <端口>       覆盖 Web 界面端口，默认取 config.json 的 web.port
   --no-open           启动 Web 界面时不自动打开浏览器
   --dry-run           只挑选并打印结果，不推送到 qBittorrent、不写状态
@@ -681,6 +683,9 @@ async function cmdAuto(
     preferPlanner: boolean;
     /** 忽略「播出计划」，立刻真检查一轮。 */
     force: boolean;
+    /** 顺手把播出安排写进计划任务的触发器。 */
+    syncTask: boolean;
+    taskName?: string;
   }
 ): Promise<number> {
   const path = options.watchlistFile ?? watchlistPath(configPath);
@@ -723,13 +728,19 @@ async function cmdAuto(
       watchlistFile: options.watchlistFile,
       retryRounds: options.retryRounds,
       preferPlanner: options.preferPlanner,
-      force: options.force
+      force: options.force,
+      syncTask: options.syncTask,
+      taskName: options.taskName
     });
 
     /*
      * 因为「还没到该检查的时间」跳过时，日志里已经写清原因和下次时间了，
      * 这里不要再打一遍「本轮结束：清单 0 条」——那看起来像什么都没干成。
      */
+    if (report.taskSync) {
+      log.info(`计划任务触发器：${report.taskSync.ok ? '已更新' : '未更新'} —— ${report.taskSync.message}`);
+    }
+
     if (report.skippedBySchedule) return 0;
 
     log.info(
@@ -820,6 +831,8 @@ export async function main(argv: string[]): Promise<number> {
       'no-playable': { type: 'boolean', default: false },
       'no-planner': { type: 'boolean', default: false },
       force: { type: 'boolean', default: false },
+      'sync-task': { type: 'boolean', default: false },
+      'task-name': { type: 'string' },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       verbose: { type: 'boolean', default: false },
@@ -898,7 +911,9 @@ export async function main(argv: string[]): Promise<number> {
         retryRounds: resolveRetryRounds(config, values.retry, values['no-retry']),
         preferPlanner: !values['no-planner'],
         // 手动跑（含 --dry-run）就忽略播出计划：用户是明确要看「现在会下什么」
-        force: values.force || values['dry-run']
+        force: values.force || values['dry-run'],
+        syncTask: values['sync-task'] === true,
+        taskName: values['task-name']
       });
     case 'run':
       return cmdRun(config, mode);

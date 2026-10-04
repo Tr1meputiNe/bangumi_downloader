@@ -39,20 +39,28 @@ if (-not (Test-Path $watchlist)) {
 # 用 auto（清单模式）而不是 run：run 依赖本机 Watch Planner 服务，
 # 那台服务不一定在这台机器上；清单模式完全本机闭环。
 # --retry 6 表示一轮没下完就自动重试 6 轮，每轮都从磁盘进度继续。
-$arguments = 'auto --retry 6'
+# --sync-task：每次触发后按最新的播出安排重排这个任务的触发器。
+# 这样任务计划程序本身就是「按播出时间排」的：播出前后每 15 分钟一次，
+# 其余时间只有低频的「重读计划」触发，不会整天无脑跑。
+$arguments = 'auto --retry 6 --sync-task'
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $root
 
-# 每 15 分钟触发一次；同时保留登录触发，保证开机后尽快跑一次。
+# 触发器：先用一套「安全兜底」，程序第一次跑完就会按播出时间重排（--sync-task）。
 #
-# 为什么是 15 分钟：番剧播出后 30~60 分钟片源站才会出种。程序内部会按
-# 「播出时刻 + readyDelayMinutes(默认60)」判断该不该找，所以 15 分钟一轮
-# 既能在那之后尽快发现新种，又不会在播出当天一整天瞎搜。
+#   - 登录时：重启后补上错过的
+#   - 1 分钟后一次：立刻算出播出安排并重排触发器，不用等到下一个周期
+#   - 每 3 小时一次（一直重复）：**兜底**。如果 --sync-task 因为权限之类的原因
+#     没成功，任务仍然是每 3 小时跑一轮，追番不会因为「触发器没排上」而彻底停摆。
+#     反过来，同步成功之后这一条会被保留成「重读计划」的低频触发。
+#
+# 重排之后的样子：每集一段（播出 + 60 分钟开始，每 15 分钟一次，持续 12 小时），
+# 加上这条 3 小时的重读计划 —— 真正干活只在播出前后。
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$triggerBootstrap = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
 $triggerRepeat = New-ScheduledTaskTrigger `
-    -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes 15) `
-    -RepetitionDuration (New-TimeSpan -Days 3650)
+    -Once -At (Get-Date).AddMinutes(2) `
+    -RepetitionInterval (New-TimeSpan -Minutes 180)
 
 # S4U：不需要存密码，也不需要用户登录，后台静默运行
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
@@ -70,7 +78,7 @@ try {
     Register-ScheduledTask `
         -TaskName $taskName `
         -Action $action `
-        -Trigger $triggerLogon, $triggerRepeat `
+        -Trigger $triggerLogon, $triggerBootstrap, $triggerRepeat `
         -Principal $principal `
         -Settings $settings `
         -Force | Out-Null
