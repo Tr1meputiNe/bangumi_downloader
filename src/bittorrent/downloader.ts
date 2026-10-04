@@ -436,7 +436,61 @@ export class TorrentDownloader extends EventEmitter {
 
     this.#log(`磁力链接：${magnet.infoHash}`);
 
-    return await this.#fetchMetadataFromPeers(magnet);
+    /*
+     * 取元数据的两条路：先按标准流程从 peer 拿（BEP 9），失败再试公开的种子缓存。
+     *
+     * 为什么要第二条路：实测两次卡死在这一步 —— 「已尝试 63 个 peer：TCP 握手成功 0，
+     * 元数据成功 0」，tracker 明明报了几十个 peer 却一个都连不上（对端在 NAT 后面
+     * 或者只在 IPv6 上）。这种情况下 peer 那边拿不到，但公开缓存站按 infohash
+     * 直接给 .torrent 文件，拿到就能开工。这条兜底不影响正常流程：
+     * 只有 BEP 9 真的失败了才会走，而且失败也只是回到原来的报错。
+     */
+    const fromPeers = await this.#fetchMetadataFromPeers(magnet).catch((error: unknown) => {
+      this.#log(`从 peer 获取元数据失败：${(error as Error).message}`);
+      return null;
+    });
+    if (fromPeers) return fromPeers;
+
+    return await this.#fetchMetadataFromCache(magnet.infoHash);
+  }
+
+  /**
+   * 从公开的种子缓存站按 infohash 取 .torrent。
+   *
+   * 这类站点（itorrents / btcache 等）本质是 DHT 的爬虫缓存，广泛用于
+   * 「磁力连不上人」的场景。全部失败就返回 null，由调用方报原来的错。
+   */
+  async #fetchMetadataFromCache(infoHash: string): Promise<TorrentMeta | null> {
+    const hash = infoHash.toLowerCase();
+    /*
+     * 实测（2026-10-04）：itorrents 对这个 infohash 返回 200 + 9.4KB 的合法种子，
+     * 解析成功、infohash 匹配；btcache 返回的是 1.7KB 的网页，解析不出来，已去掉。
+     */
+    const urls = [`https://itorrents.org/torrent/${hash.toUpperCase()}.torrent`];
+
+    for (const url of urls) {
+      try {
+        this.#log(`从 peer 拿不到元数据，试试公开缓存：${new URL(url).host}`);
+        const response = await fetch(url, {
+          signal: AbortSignal.timeout(12_000),
+          headers: { accept: 'application/x-bittorrent,application/octet-stream' }
+        });
+        if (!response.ok) continue;
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const meta = parseTorrentFile(bytes);
+        if (!meta) continue;
+        // 缓存站偶尔给错种子，infohash 必须对得上
+        if (meta.infoHash && meta.infoHash.toLowerCase() !== hash) {
+          this.#log('缓存给的种子 infohash 不匹配，忽略');
+          continue;
+        }
+        this.#log(`缓存里拿到了种子文件：《${meta.name}》`);
+        return meta;
+      } catch (error) {
+        this.#log(`缓存 ${new URL(url).host} 不可用：${(error as Error).message}`);
+      }
+    }
+    return null;
   }
 
   async #fetchMetadataFromPeers(magnet: NonNullable<ReturnType<typeof parseMagnet>>): Promise<TorrentMeta | null> {
