@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig } from '../config.js';
 import type { ScoredCandidate } from '../anime/rank.js';
@@ -291,10 +291,96 @@ async function existingBytesFor(candidate: ScoredCandidate, options: FallbackOpt
     const location = locateTorrent(meta, options.savePath, options.config.download.seriesDir);
     if (!location.exists) return 0;
 
-    return nonPaddingBytes(location.dir);
+    /*
+     * 注意这里是「抽样估算真实数据」，不是文件名义长度。
+     *
+     * 存储层为了断点续传会把文件预分配到完整长度，所以一个**一个分片都没下成**
+     * 的目录，名义上也有 900MB。之前用名义长度判断「上次下到一半」，
+     * 于是每轮都认定「磁盘上已有 913MB，直接续传」，把时间全花在一条
+     * 其实早死掉的种子上，新发布的、做种多的版本永远轮不到 ——
+     * 这正是「下了几个小时还没下完」的直接原因。
+     */
+    return sampledRealBytes(location.dir);
   } catch {
     return 0;
   }
+}
+
+/**
+ * 抽样估算目录里「真的有数据」的字节数。
+ *
+ * 每个文件最多读 8 个窗口（每窗 64KB）铺满整个文件，用非零比例外推总字节数。
+ * 对「预分配的空壳」得到接近 0，对「下了一部分」得到接近真实进度。
+ * 只用来判断「值不值得续传」（8MB 门槛），不需要精确。
+ */
+function sampledRealBytes(dir: string): number {
+  /*
+   * 32 个窗口 × 64KB ≈ 2MB 采样量。
+   *
+   * 为什么不是 8 个：分片是「最稀有优先」分散下载的，一个有 24MB 真实数据的
+   * 912MB 文件，那 24MB 会散在十几个 2MB 的块里；只采 8 个 64KB 的窗口
+   * 命中概率只有两成，会把它误判成「没有进度」。
+   * 采样密一点成本仍然可忽略（2MB 读盘），而漏判的代价是白白重头试跑。
+   */
+  const SAMPLES = 32;
+  const WINDOW = 64 * 1024;
+  let estimate = 0;
+
+  const walk = (current: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (/padding_file/i.test(entry.name)) continue;
+
+      let size = 0;
+      try {
+        size = statSync(full).size;
+      } catch {
+        continue;
+      }
+      if (size <= 0) continue;
+
+      const window = Math.max(1, Math.min(WINDOW, Math.ceil(size / SAMPLES)));
+      const span = Math.max(1, size - window);
+      let fd: number | null = null;
+      let nonzero = 0;
+      let total = 0;
+      try {
+        fd = openSync(full, 'r');
+        for (let index = 0; index < SAMPLES; index += 1) {
+          const offset = Math.floor((span * index) / (SAMPLES - 1));
+          const buffer = Buffer.alloc(window);
+          let read = 0;
+          try {
+            read = readSync(fd, buffer, 0, window, offset);
+          } catch {
+            continue;
+          }
+          for (let i = 0; i < read; i += 1) if (buffer[i] !== 0) nonzero += 1;
+          total += read;
+        }
+      } catch {
+        continue;
+      } finally {
+        if (fd !== null) closeSync(fd);
+      }
+
+      if (total > 0) estimate += (nonzero / total) * size;
+    }
+  };
+
+  walk(dir);
+  return estimate;
 }
 
 /**
@@ -334,34 +420,6 @@ export function metadataCacheDir(options: { savePath: string }): string {
   return join(options.savePath, '.bangumi-meta');
 }
 
-/** 目录下所有非填充文件的长度之和。 */
-function nonPaddingBytes(dir: string): number {
-  let total = 0;
-  const walk = (current: string): void => {
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-        continue;
-      }
-      if (/padding_file/i.test(entry.name)) continue;
-      try {
-        total += statSync(full).size;
-      } catch {
-        /* 忽略读不到的文件 */
-      }
-    }
-  };
-  walk(dir);
-  return total;
-}
-
 type AttemptOutcome = {
   completed: boolean;
   infoHash: string;
@@ -398,18 +456,28 @@ async function runAttempt(
   let bytes: number = 0;
   let latestDownloaded: number | null = null;
 
+  /*
+   * 目录归纳规则必须和 dispatch（网页那条路）保持一致：
+   * 番剧统一放进 savePath/seriesDir，单文件种子用发布名当文件夹名。
+   * 这里以前漏了这两项，结果自动化下的内容散在下载根目录里，
+   * 而「片库」页只扫番剧子目录 —— 下好了却在界面上看不见。
+   *
+   * 单文件种子的目录名还有个坑：以前用的是种子里的文件名，
+   * 现在是发布标题，同一个种子换个规则就会**再建一个目录**，
+   * 于是同一集出现两份（一份老命名、一份新命名），看着像下了两个。
+   * 所以先按 locateTorrent 找一遍磁盘上已有的那份，找到就用它的目录名。
+   */
+  const existing = await metadataFor(candidate, options)
+    .then((meta) => (meta ? locateTorrent(meta, options.savePath, options.config.download.seriesDir) : null))
+    .catch(() => null);
+  const singleFileDir = existing?.exists ? existing.singleFileDir : candidate.result.title;
+
   const downloader = new TorrentDownloader({
     magnet: candidate.result.magnet || undefined,
     torrentFile,
     savePath: options.savePath,
-    /*
-     * 目录归纳规则必须和 dispatch（网页那条路）保持一致：
-     * 番剧统一放进 savePath/seriesDir，单文件种子用发布名当文件夹名。
-     * 这里以前漏了这两项，结果自动化下的内容散在下载根目录里，
-     * 而「片库」页只扫番剧子目录 —— 下好了却在界面上看不见。
-     */
     seriesRoot: options.config.download.seriesDir?.trim() || undefined,
-    singleFileDir: candidate.result.title,
+    singleFileDir,
     selectedFiles,
     timeoutMs: seconds * 1000,
     // 试跑阶段不要因为「暂时没进度」提前退出，让它把观察窗口跑满

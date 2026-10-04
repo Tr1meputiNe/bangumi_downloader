@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config.js';
 import { searchAndRank } from './search.js';
+import type { ScoredCandidate } from '../anime/rank.js';
 import { downloadUntilComplete } from './retry.js';
 import {
   loadWatchlist,
@@ -14,6 +15,7 @@ import { buildTaskSchedule, syncTaskSchedule, type SyncResult } from './task-sch
 import {
   applyPlan,
   autoSchedulePath,
+  broadcastTimeOf,
   decideRun,
   formatClock,
   isEpisodeDone,
@@ -394,6 +396,63 @@ async function runFromPlanner(
   return report;
 }
 
+/** 目标集的播出时刻（拿不到就返回 null）。 */
+export function airedAtOf(gap: AnimeGap, episode: number): Date | null {
+  const meta = gap.episodeMeta.get(episode);
+  if (!meta) return null;
+  return broadcastTimeOf(meta.airdate, meta.airTime ?? null);
+}
+
+/**
+ * 从「按集号严格匹配用不上」的候选里挑出疑似同一集的发布。
+ *
+ * 判据（全部要满足）：
+ *   - 单集发布（不是合集：合集没法确认它到底含不含这一集）
+ *   - 没被偏好淘汰、有下载链接
+ *   - 集号**大于**目标集号（编号偏移只会让数字变大，不会变小）
+ *   - 集号没离谱（目标 + 200 以内；长篇番的连续编号可能很大，但不会到天上去）
+ *   - 发布时间在目标集播出之后（这是最强的约束：字幕组不会提前放没播的集）
+ *
+ * 为什么值得冒这个险：真实的例子是 Planner 按季内编号说「第 13 集」，
+ * 而字幕组用全季连续编号写成 S01E25 —— 严格匹配只剩一条没种的 raw，
+ * 做种多、内封字幕的那几条全被扔掉，结果一整晚只下了几十 MB。
+ */
+export function selectRelaxedCandidates(input: {
+  ranked: readonly ScoredCandidate[];
+  targetEpisode: number;
+  airedAt: Date | null;
+  season?: number | null;
+  limit?: number;
+}): ScoredCandidate[] {
+  const limit = input.limit ?? 6;
+  const maxEpisode = input.targetEpisode + 200;
+  // 播出前几小时就发布的（有些组会提前挂种）留一点余量
+  const earliest = input.airedAt === null ? null : input.airedAt.getTime() - 6 * 3_600_000;
+
+  const picked: ScoredCandidate[] = [];
+  for (const item of input.ranked) {
+    if (item.rejected) continue;
+    if (!item.result.magnet && !item.result.torrentUrl) continue;
+    if (item.parsed.isSpecial) continue;
+    if (item.parsed.episodes.length !== 1) continue;
+
+    const episode = item.parsed.episodes[0] as number;
+    if (episode <= input.targetEpisode) continue;
+    if (episode > maxEpisode) continue;
+
+    if (earliest !== null) {
+      const published = item.result.publishedAt ? Date.parse(item.result.publishedAt) : Number.NaN;
+      // 发布时间缺失时放行（拿不到不代表不对），能拿到就必须在播出之后
+      if (!Number.isNaN(published) && published < earliest) continue;
+    }
+
+    picked.push(item);
+    if (picked.length >= limit) break;
+  }
+
+  return picked;
+}
+
 /** Planner 的某一集用哪条发布，交给和 download 命令相同的那条路径。 */
 async function downloadForGap(gap: AnimeGap, options: {
   config: AppConfig;
@@ -462,12 +521,52 @@ async function downloadForGap(gap: AnimeGap, options: {
     return { episodes: wanted, reason: '没搜到任何候选', downloaded: false, files: 0, completed: false };
   }
 
+  /*
+   * 严格按集号匹配可能只匹配到一条「别人不用这个编号」的发布。
+   *
+   * 真实例子：Planner 说《相反的你和我 第二季》第 13 集（按季内编号），
+   * 而绝大多数字幕组用的是**全季连续编号** —— 同一集写成 S01E25。
+   * 严格匹配于是只剩一条几乎没种的 raw（20 KB/s 下了几个小时），
+   * 而做种多、内封字幕的那几条全被判成「集号不对」扔掉。
+   *
+   * 所以严格匹配的候选偏少时，再搜一次并放宽：同一部番、发布时间在目标集
+   * 播出之后、集号比目标大（编号偏移一定更大）的单集发布，一并作为候选排在后面。
+   * 严格匹配的仍然排在最前面 —— 有对的就先下对的。
+   */
+  let relaxed: ScoredCandidate[] = [];
+  const strictCount = outcome.ranked.filter((item) => !item.rejected && (item.result.magnet || item.result.torrentUrl)).length;
+  if (strictCount < 3 && wanted.length === 1) {
+    const targetEpisode = wanted[0] as number;
+    try {
+      const wide = await searchAndRank({
+        query: gap.queries[0] ?? name,
+        altQuery: gap.queries[1],
+        config,
+        mode: 'manual'
+      });
+      relaxed = selectRelaxedCandidates({
+        ranked: wide.ranked,
+        targetEpisode,
+        airedAt: airedAtOf(gap, targetEpisode),
+        season: gap.season
+      });
+      if (relaxed.length > 0) {
+        log.info(
+          `严格匹配只有 ${strictCount} 条可用，另有 ${relaxed.length} 条疑似同一集（集号 ` +
+            `${relaxed.map((item) => item.parsed.episodes[0]).join('/')}，可能是全季连续编号），一并作为候选`
+        );
+      }
+    } catch (error) {
+      log.warn(`放宽集号匹配时搜索失败：${(error as Error).message}`);
+    }
+  }
+
   if (options.dryRun) {
     return { episodes: wanted, reason: 'dry-run', downloaded: false, files: 0, completed: false };
   }
 
   const result = await downloadUntilComplete({
-    candidates: outcome.ranked,
+    candidates: [...outcome.ranked, ...relaxed],
     config,
     episodes: wanted,
     savePath: options.savePath,
@@ -489,7 +588,15 @@ async function downloadForGap(gap: AnimeGap, options: {
         targets: targets.filter((target) => wanted.includes(target.episode)),
         targetSeason: gap.season
       });
-      return again.ranked;
+      // 新出现的、疑似同一集但编号方式不同的发布也要带上
+      const wide = await searchAndRank({ query: gap.queries[0] ?? name, altQuery: gap.queries[1], config, mode: 'manual' });
+      const relaxedAgain = selectRelaxedCandidates({
+        ranked: wide.ranked,
+        targetEpisode: wanted[0] as number,
+        airedAt: airedAtOf(gap, wanted[0] as number),
+        season: gap.season
+      });
+      return [...again.ranked, ...relaxedAgain];
     }
   });
 
