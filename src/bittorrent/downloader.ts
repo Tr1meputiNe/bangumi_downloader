@@ -100,8 +100,6 @@ type PeerState = {
   connection: PeerConnection;
   /** 已派出去、还没回来的 block。 */
   inFlight: Set<string>;
-  /** 每个 piece 已收到的 block：begin -> 数据。 */
-  pieces: Map<number, Map<number, Uint8Array>>;
   /** 是否已经对这条连接发过 interested。 */
   interestedSent: boolean;
   /** 连接建立时间，用来给「迟迟不宣告 piece 的 peer」一个宽限期。 */
@@ -119,6 +117,16 @@ export class TorrentDownloader extends EventEmitter {
   #storage: TorrentStorage | null = null;
   /** 「还没下完」标记文件的路径（下完要删掉）。 */
   #markerPath: string | null = null;
+  /**
+   * 每个分片已经收到的 block（begin -> 数据）。
+   *
+   * **必须按分片存，不能按 peer 存** —— 这是踩过的一个大坑：
+   * 同一个分片的 block 经常来自多个 peer（多连接并行、endgame 重复请求），
+   * 原来把缓冲挂在 peer 上，于是凑齐时只用「最后一个 peer 自己那份」去拼，
+   * 其余 peer 收到的 block 全是空的 → SHA1 必然不匹配 → 重新排队 → 再失败，
+   * 表现就是「一直在收数据（几百 MB），已完成分片却几乎不涨」。
+   */
+  #pieceBuffers = new Map<number, Map<number, Uint8Array>>();
   #peers = new Map<string, PeerState>();
   #peerPool = new Map<string, PeerAddress>();
   #dht: DhtClient | null = null;
@@ -656,7 +664,6 @@ export class TorrentDownloader extends EventEmitter {
     this.#peers.set(key, {
       connection,
       inFlight: new Set(),
-      pieces: new Map(),
       interestedSent: false,
       connectedAt: Date.now(),
       goodBytes: 0,
@@ -692,7 +699,6 @@ export class TorrentDownloader extends EventEmitter {
         const state: PeerState = {
           connection: null as unknown as PeerConnection,
           inFlight: new Set(),
-          pieces: new Map(),
           interestedSent: false,
           connectedAt: Date.now(),
           goodBytes: 0,
@@ -949,18 +955,18 @@ export class TorrentDownloader extends EventEmitter {
     this.#receivedBytes += block.length;
     blocks.splice(position, 1);
 
-    let pieceBuffer = state.pieces.get(index);
+    let pieceBuffer = this.#pieceBuffers.get(index);
     if (!pieceBuffer) {
       pieceBuffer = new Map<number, Uint8Array>();
-      state.pieces.set(index, pieceBuffer);
+      this.#pieceBuffers.set(index, pieceBuffer);
     }
     pieceBuffer.set(begin, block);
 
     if (blocks.length > 0) return;
 
-    // 这个 peer 视角下该分片已凑齐，但可能还有别的 peer 的在途 block，一并作废
+    // 全局队列空了 = 这个分片的 block 都到齐了（可能来自不同 peer）
     const assembled = this.#assemblePiece(index, pieceBuffer);
-    state.pieces.delete(index);
+    this.#pieceBuffers.delete(index);
 
     if (assembled === null) {
       this.#verifyFailures += 1;
@@ -1008,6 +1014,8 @@ export class TorrentDownloader extends EventEmitter {
   #requeuePiece(piece: number): void {
     if (!this.#storage) return;
     if (this.#storage.verified.has(piece)) return;
+    // 校验失败说明收到的 block 有问题（或拼错了），整片缓冲一起丢掉重来
+    this.#pieceBuffers.delete(piece);
     const size = pieceSize(this.#storage.meta, piece);
     const blocks: PendingBlock[] = [];
     for (let begin = 0; begin < size; begin += BLOCK_SIZE) {
