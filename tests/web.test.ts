@@ -180,14 +180,21 @@ describe('Web 服务', () => {
     }
   });
 
-  it('/api/status 分开返回版本与连接状态', async () => {
+  it('/api/status 分开返回版本与连接状态（默认内置引擎时下载可用）', async () => {
     const response = await fetch(`${started.url}api/status`);
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     // 版本号必须始终是纯版本号，不能混进错误信息
     expect(typeof body.version).toBe('string');
     expect(body.version as string).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(body.qbittorrent).toBe('not-configured');
+    /*
+     * 这里以前断言 not-configured —— 那是「下载只能靠 qBittorrent」时代的语义。
+     * 现在默认后端是内置引擎（零外部依赖），没有 qBittorrent 也照样能下载，
+     * 所以状态必须是 ok。否则界面会一直挂着「未配置 qBittorrent，只能搜索不能下载」
+     * 这种假警告，让人以为下载坏了。
+     */
+    expect(body.backend).toBe('builtin');
+    expect(body.qbittorrent).toBe('ok');
     // message 是给人看的一句话，不应包含换行
     expect(body.message as string).not.toContain('\n');
   });
@@ -203,13 +210,22 @@ describe('Web 服务', () => {
     expect(await response.json()).toMatchObject({ error: expect.stringContaining('q') });
   });
 
-  it('未配置 qBittorrent 时 /api/add 返回 503', async () => {
+  it('内置引擎后端下 /api/add 不再因为「没有 qBittorrent」被拒', async () => {
     const response = await fetch(`${started.url}api/add`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ items: [{ title: 'x', magnet: 'magnet:?xt=urn:btih:abc' }] })
     });
-    expect(response.status).toBe(503);
+    /*
+     * 以前这里断言 503（未配置 qBittorrent）。现在默认走内置引擎，
+     * 请求会被正常受理；测试环境没有真实种子，因此允许它因为
+     * 下载失败而返回带 results 的 200，只要不是 503 挡在门口。
+     */
+    expect(response.status).not.toBe(503);
+    if (response.status === 200) {
+      const body = (await response.json()) as { results?: unknown[] };
+      expect(Array.isArray(body.results)).toBe(true);
+    }
   });
 
   it('未知路径返回 404', async () => {
@@ -223,8 +239,8 @@ describe('Web 服务', () => {
       headers: { 'content-type': 'application/json' },
       body: 'not json'
     });
-    // 该服务器未配置 qBittorrent，会先撞 503；两者都算合理拒绝
-    expect([400, 503]).toContain(response.status);
+    // 必须被判为「请求体有问题」，而不是被后端配置挡掉
+    expect(response.status).toBe(400);
   });
 
 });

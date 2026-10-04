@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import type { AppConfig } from '../config.js';
 import { QbittorrentClient } from '../qbittorrent/client.js';
 import { searchAndRank } from '../core/search.js';
-import { dispatchDownload } from '../core/dispatch.js';
+import { dispatchDownload, resolveBackend } from '../core/dispatch.js';
 import { toDisplayResult } from './serialize.js';
 import { SearchCache } from '../util/cache.js';
 import { clientCss, clientJs } from './assets.js';
@@ -72,12 +72,26 @@ async function handle(deps: WebDeps, request: IncomingMessage, response: ServerR
 }
 
 async function buildStatus(deps: WebDeps) {
-  // 分开返回「应用版本」和「qBittorrent 连接情况」。
-  // 之前把整段错误信息塞进 version 字段，前端会渲染出一大串带换行的报错，很难看。
-  const base = { version: VERSION, planner: deps.config.plannerBaseUrl };
+  /*
+   * 状态里的 qbittorrent 字段是历史包袱：它原本表示「下载能力可用吗」。
+   * 现在默认后端是内置引擎（不需要任何外部程序），所以：
+   *   - builtin 后端：直接报 ok，并且说明用的是自带引擎；
+   *   - qbittorrent 后端：仍然去 ping 它，连不上就报错。
+   * 否则用内置引擎时界面会一直显示「未配置 qBittorrent，只能搜索不能下载」，
+   * 而实际上点下载是能用的 —— 这种假警告会让人以为功能坏了。
+   */
+  const base = {
+    version: VERSION,
+    planner: deps.config.plannerBaseUrl,
+    backend: resolveBackend(deps.config)
+  };
+
+  if (resolveBackend(deps.config) === 'builtin') {
+    return { ...base, qbittorrent: 'ok', message: '内置下载引擎（无需 qBittorrent）' };
+  }
 
   if (!deps.qbittorrent) {
-    return { ...base, qbittorrent: 'not-configured', message: '未配置 qBittorrent（只能搜索，不能下载）' };
+    return { ...base, qbittorrent: 'not-configured', message: '后端配置为 qBittorrent，但客户端未初始化' };
   }
 
   try {
@@ -135,8 +149,9 @@ type AddBody = {
 };
 
 async function handleAdd(deps: WebDeps, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  if (!deps.qbittorrent) {
-    return sendJson(response, 503, { error: '未配置 qBittorrent（config.json 的 download.enabled 可能为 false）' });
+  // 用内置引擎时不需要 qBittorrent；只有真的选了 qbittorrent 后端才要求它可用
+  if (resolveBackend(deps.config) === 'qbittorrent' && !deps.qbittorrent) {
+    return sendJson(response, 503, { error: '后端配置为 qBittorrent，但客户端未初始化' });
   }
 
   let body: AddBody;

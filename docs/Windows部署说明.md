@@ -10,7 +10,7 @@
 | 我想… | 双击这个 | 说明 |
 | --- | --- | --- |
 | 搜一部番、直接下整季 | `8-download.cmd` | 输入番名即可；会逐条实测速度，挑能下动的下 |
-| 打开网页搜索界面 | `3-search.cmd` | 浏览器打开 `http://127.0.0.1:3778/`，勾选后下载 |
+| 打开网页搜索界面 | `9-webui.cmd` | 启动服务并自动开浏览器；已在后台常驻时直接访问 `http://127.0.0.1:3778/` |
 | 改配置 | `1-setup.cmd` | 用记事本打开 `config.json` |
 | 检查连通性 | `2-check.cmd` | 逐项测试片源与下载后端 |
 | 自动追番（常驻） | `4-auto.cmd` | 按 `watchlist.json` 每 30 分钟检查一次新集 |
@@ -137,6 +137,45 @@ bangumi-downloader.exe auto --dry-run --config other.json :: 把 readyDelayMinut
   `completedEpisodes` 是「哪几集真的下完了」，`lastEpisode` 是「连续追到第几集」
 - `startFrom`：可选，从第几集开始追
 - `enabled: false`：可选，临时跳过这一条
+
+## 网页界面
+
+有 GUI，就是 `9-webui.cmd`（或直接访问 **`http://127.0.0.1:3778/`**）。
+
+```
+9-webui.cmd  →  浏览器自动打开
+```
+
+界面上能做的事：
+
+- 输入番名搜索，结果从 animes.garden / nyaa 并行抓取、按偏好打分排序
+- 每条标出**集号、分辨率、容器、字幕语言、字幕组、体积**，右边的分数鼠标悬停可看构成
+- **点整行勾选**（可多选），右下角一次推送到下载
+- 顶部可按片源过滤，或勾「只看符合偏好」把不合偏好的折叠起来
+- 选中的是合集时，只下你勾中的那几集
+
+右上角的连接状态现在会显示 **「内置下载引擎（无需 qBittorrent）」**。
+（以前没有 qBittorrent 时这里会报「只能搜索，不能下载」——那是旧后端的说法，
+现在默认用自带引擎，点下载是真的能下的。）
+
+### 让它常驻
+
+`9-webui.cmd` 是前台运行，关掉窗口就停。想让它一直在（随时打开浏览器就能用），
+已经注册了一个后台计划任务 **`BangumiDownloader-GUI`**：
+
+- 登录时启动，另外每 15 分钟自愈一次（崩溃或被关掉会自动回来）
+- 已经在跑时，重复触发会因为端口被占而立刻退出，不会起两个
+
+需要停掉它：
+
+```powershell
+Stop-ScheduledTask  -TaskName BangumiDownloader-GUI
+Unregister-ScheduledTask -TaskName BangumiDownloader-GUI -Confirm:$false
+```
+
+注意它只监听 `127.0.0.1`（只有本机能访问）。想从别的机器用，
+把 `config.json` 里 `web.host` 改成 `0.0.0.0` —— 但那等于把下载接口开放给局域网，
+自己评估风险。
 
 ### 报告里的符号怎么看
 
