@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { exec } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { loadConfig, type AppConfig } from '../config.js';
@@ -1344,6 +1345,18 @@ async function probeExistingServer(
 }
 
 /** 启动 Web 界面并返回实际监听地址。端口传 0 时可以拿到系统分配的端口（测试用）。 */
+/** 本机所有可用的访问地址（监听全部网卡时用）。 */
+function localUrls(port: number): string[] {
+  const urls = [`http://127.0.0.1:${port}/`];
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    for (const item of addresses ?? []) {
+      if (item.internal || item.family !== 'IPv4') continue;
+      urls.push(`http://${item.address}:${port}/${name === 'Tailscale' ? '（Tailscale）' : ''}`);
+    }
+  }
+  return urls;
+}
+
 export async function startWebServer(deps: WebDeps): Promise<StartedServer> {
   const server = createWebServer(deps);
   const { port, host } = deps.config.web;
@@ -1387,8 +1400,17 @@ export async function startWebServer(deps: WebDeps): Promise<StartedServer> {
 
   const address = server.address();
   const actualPort = address !== null && typeof address === 'object' ? address.port : port;
-  const url = `http://${host}:${actualPort}/`;
-  log.info(`Web 界面已启动：${url}`);
+
+  /*
+   * 监听 0.0.0.0 / :: 时，日志里打 "http://0.0.0.0:3778/" 是没法点的 ——
+   * 用户复制这个地址到浏览器必然打不开（实测被问过「重启后打不开 webui」，
+   * 原因就是地址不对）。所以这里把本机真实可用的地址列出来。
+   */
+  const listenAll = host === '0.0.0.0' || host === '::' || host === '';
+  const urls = listenAll ? localUrls(actualPort) : [`http://${host}:${actualPort}/`];
+  // 对外报的地址：监听全部网卡时优先给 Tailscale 那个（异地也能访问），否则给 127.0.0.1
+  const url = urls.find((item) => item.includes('Tailscale')) ?? urls[0] ?? `http://${host}:${actualPort}/`;
+  log.info(`Web 界面已启动：${urls.join('　')}`);
 
   if (deps.config.web.openBrowser) openBrowser(url);
 
