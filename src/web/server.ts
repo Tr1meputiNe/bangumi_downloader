@@ -517,6 +517,12 @@ function toJobView(job: ReturnType<JobQueue['list']>[number]) {
     files: job.files,
     error: job.error,
     backend: job.backend,
+    /*
+     * 种子来源。'none' = 既没有磁力也没有直链 —— 这种任务必然失败，
+     * 但要等轮到它才报错，所以直接暴露出来，排查时一眼能看到
+     * （实测：从 mikan 加的任务只有直链，而 mikan 会清理老链接，过期就是 404）。
+     */
+    source: job.magnet ? 'magnet' : job.torrentUrl ? 'torrent' : 'none',
     // 前端据此决定显示哪些按钮，省得它自己推状态机
     canPause: job.status === 'running' || job.status === 'queued',
     canResume: job.status === 'paused',
