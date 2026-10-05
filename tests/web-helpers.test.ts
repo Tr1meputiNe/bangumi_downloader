@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -466,5 +466,62 @@ describe('「还要多久」的估算', () => {
     expect(formatEta(0, 1024)).toBeNull();
     expect(formatEta(-5, 1024)).toBeNull();
     expect(formatEta(null, 1024)).toBeNull();
+  });
+});
+
+describe('直链失效时的自救：按标题找回磁力', () => {
+  it('标题完全一致时直接认它（忽略括号/空白差异）', async () => {
+    const { recoverMagnetByTitle } = await import('../src/core/dispatch.js');
+    const title = '[DBD-Raws][吹响吧！上低音号 第一季][01-13TV全集+OVA+特典映像][1080P][BDRip]';
+    const magnet = `magnet:?xt=urn:btih:${'a'.repeat(40)}`;
+    const config = {
+      trackers: { animesGarden: true, mikan: false, nyaa: false, maxResultsPerTracker: 60, timeoutMs: 1000, retries: 0 },
+      preference: {},
+      download: {}
+    } as never;
+
+    const { searchAndRank } = await import('../src/core/search.js');
+    const original = searchAndRank;
+    // 用一个假的搜索替换（不打网络）
+    const search = (await import('../src/core/search.js')) as { searchAndRank: typeof searchAndRank };
+    const spy = vi.spyOn(search, 'searchAndRank');
+    spy.mockResolvedValue({
+      queries: [title],
+      rawCount: 1,
+      elapsedMs: 1,
+      errors: [],
+      ranked: [
+        {
+          result: { title: title.replace(/[[\]]/g, ' '), magnet, sizeBytes: 23300198400, tracker: 'mikan' },
+          parsed: { episodes: [], kind: 'batch' },
+          score: 80,
+          reasons: [],
+          rejected: false
+        }
+      ]
+    } as never);
+
+    try {
+      const logs: string[] = [];
+      const found = await recoverMagnetByTitle(config, title, 23300198400, { onLog: (m) => logs.push(m) });
+      expect(found).toBe(magnet);
+      expect(logs.join(' ')).toContain('找回同一条发布');
+    } finally {
+      spy.mockRestore();
+      void original;
+    }
+  });
+
+  it('搜不到时返回 null，不硬凑一个别的版本', async () => {
+    const { recoverMagnetByTitle } = await import('../src/core/dispatch.js');
+    const config = { trackers: { timeoutMs: 1000 }, download: {} } as never;
+    const search = (await import('../src/core/search.js')) as { searchAndRank: typeof import('../src/core/search.js').searchAndRank };
+    const spy = vi.spyOn(search, 'searchAndRank');
+    spy.mockResolvedValue({ queries: [], rawCount: 0, elapsedMs: 1, errors: [], ranked: [] } as never);
+    try {
+      expect(await recoverMagnetByTitle(config, '[某组][某番][01-12][1080P]', 1000)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

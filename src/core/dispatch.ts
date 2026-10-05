@@ -7,6 +7,7 @@ import { magnetInfoHash } from '../util/magnet.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
+import { searchAndRank } from './search.js';
 import { probeSeeders } from './viable.js';
 
 const log = logger('dispatch');
@@ -61,6 +62,57 @@ export type DispatchDeps = {
   /** config.json 的路径（跨进程去重用）。 */
   configPath?: string;
 };
+
+/**
+ * 按标题找回同一条发布的磁力。
+ *
+ * 用于「.torrent 直链失效、又没有磁力」的救援（mikan 会清理老文件，
+ * 从那里添加的任务过一阵子就会遇到）。匹配要保守：
+ *   - 优先标题完全一致（规范化后比较，忽略大小写/空白/括号）
+ *   - 其次要求「同一字幕组标签 + 体积接近（±2%）」，避免搜到别的版本
+ * 找不到就返回 null，让调用方照常报错。
+ */
+export async function recoverMagnetByTitle(
+  config: AppConfig,
+  title: string,
+  sizeBytes: number | null,
+  hooks: { onLog?: (message: string) => void } = {}
+): Promise<string | null> {
+  // 界面会给标题追加「（检索用：xxx）」，那是搜索提示，不是发布名的一部分
+  const cleaned = title.replace(/（检索用：.*?）/g, '').trim();
+  const query = cleaned.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim() || cleaned;
+
+  try {
+    const outcome = await searchAndRank({ query, config, mode: 'manual', resolveMikanMagnet: true });
+    const norm = (value: string): string =>
+      value.toLowerCase().replace(/[\s[\]（）()【】_·・!！~～-]+/g, '');
+    const wanted = norm(cleaned);
+    const group = /^\[([^\]]+)\]/.exec(cleaned)?.[1] ?? '';
+
+    const candidates = outcome.ranked.filter((item) => item.result.magnet);
+    const exact = candidates.find((item) => norm(item.result.title) === wanted);
+    const sameGroup = candidates.find((item) => {
+      if (group !== '' && !item.result.title.includes(group)) return false;
+      if (sizeBytes === null || sizeBytes <= 0) return true;
+      const size = item.result.sizeBytes ?? 0;
+      return size > 0 && Math.abs(size - sizeBytes) / sizeBytes <= 0.02;
+    });
+
+    const picked = exact ?? sameGroup;
+    if (!picked) {
+      hooks.onLog?.(`种子直链已失效，按标题也没找到同一条发布（搜了「${query.slice(0, 40)}」）`);
+      return null;
+    }
+    hooks.onLog?.(
+      `种子直链已失效（mikan 会清理老链接），已按标题找回同一条发布，改用磁力：` +
+        `${picked.result.title.slice(0, 60)}`
+    );
+    return picked.result.magnet;
+  } catch (error) {
+    hooks.onLog?.(`按标题找回磁力失败：${(error as Error).message}`);
+    return null;
+  }
+}
 
 export async function dispatchDownload(deps: DispatchDeps, input: PushInput): Promise<DispatchResult> {
   const backend = resolveBackend(deps.config);
@@ -140,8 +192,30 @@ async function downloadWithBuiltinClaimed(
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) throw new Error('内置下载后端需要配置 download.savePath（下载到哪个目录）');
 
+  const timeoutMs = config.trackers.timeoutMs ?? 20_000;
+
+  // 优先用 .torrent 直链：省掉 BEP 9 那一步，也更容易在连不上 peer 时拿到文件清单
+  let torrentFile: Uint8Array | undefined;
+  if (input.torrentUrl) {
+    torrentFile = (await downloadTorrentBytes(input.torrentUrl, timeoutMs).catch(() => null)) ?? undefined;
+  }
+
+  /*
+   * 直链拿不到（没给，或者像 mikan 那样老链接被清理成 404）、又没有磁力时，
+   * 按标题把同一条发布的磁力找回来。
+   *
+   * 实测踩到：用户从 mikan 加的任务只有 .torrent 直链，链接过期后既没有可用直链、
+   * 也没有磁力，引擎无从下手 —— 表现就是「这条下载不了」。
+   * 标题里带着足够信息（字幕组、番名、集数、分辨率），搜一次就能找回同一条发布。
+   */
+  let magnet = input.magnet ?? '';
+  if (!torrentFile && !magnet && input.title.trim() !== '') {
+    const recovered = await recoverMagnetByTitle(config, input.title, input.sizeBytes ?? null, hooks);
+    if (recovered) magnet = recovered;
+  }
+
   const episodes = input.episodes ?? [];
-  const infoHash = input.magnet ? magnetInfoHash(input.magnet) : null;
+  const infoHash = magnet ? magnetInfoHash(magnet) : null;
 
   /*
    * 探活：先问公共 tracker「这个种子有多少做种」，写进任务日志。
@@ -163,13 +237,6 @@ async function downloadWithBuiltinClaimed(
     } catch (error) {
       hooks.onLog?.(`探活失败（${(error as Error).message}），直接开始下载`);
     }
-  }
-  const timeoutMs = config.trackers.timeoutMs ?? 20_000;
-
-  // 优先用 .torrent 直链：省掉 BEP 9 那一步，也更容易在连不上 peer 时拿到文件清单
-  let torrentFile: Uint8Array | undefined;
-  if (input.torrentUrl) {
-    torrentFile = (await downloadTorrentBytes(input.torrentUrl, timeoutMs).catch(() => null)) ?? undefined;
   }
 
   let selectedFiles: number[] | undefined;
@@ -197,7 +264,7 @@ async function downloadWithBuiltinClaimed(
   const singleFileDir = input.title;
 
   const downloader = new TorrentDownloader({
-    magnet: input.magnet || undefined,
+    magnet: magnet || undefined,
     torrentFile,
     savePath,
     seriesRoot,
