@@ -52,6 +52,8 @@ export type DownloadJob = {
   totalBytes: number | null;
   /** 已经自动重试过几次。 */
   retries: number;
+  /** 因为让路给新播出的剧集而暂停（自动追番下完后自动恢复）。 */
+  yieldedFor?: string | null;
   /** 字节/秒。 */
   speed: number;
   peers: number;
@@ -98,6 +100,20 @@ type JobDeps = {
    * 只要把「待办」记住，重启后自动续上即可。
    */
   statePath?: string;
+  /**
+   * 「现在有新播出的剧集在下，队列该让路吗」。
+   *
+   * 返回一行描述（例如《某番》第 3 集）表示让路，返回 null 表示继续下。
+   * 由上层注入（网页服务读计划文件里自动追番的实时进度）。
+   *
+   * 为什么要有：用户的要求是「优先下载新播出的」。自动追番跑在另一个进程，
+   * 队列里的补番任务不会自己让路，两边就会抢带宽 —— 新番刚播出正需要抢先下，
+   * 补番晚几分钟没有任何损失。
+   */
+  yieldTo?: () => string | null;
+  /** 让路检查间隔（毫秒）。默认 20 秒检查一次、60 秒恢复一次；测试里调小。 */
+  yieldCheckMs?: number;
+  yieldResumeMs?: number;
 };
 
 const MAX_MESSAGES = 40;
@@ -119,6 +135,8 @@ export class JobQueue extends EventEmitter {
   #controllers = new Map<string, AbortController>();
   /** 每个任务的下载进度，暂停续传时用来判断「有没有真的接着下」。 */
   #progress = new Map<string, number>();
+  /** 让路自动恢复用的定时器。 */
+  #yieldTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: JobDeps) {
     super();
@@ -213,6 +231,7 @@ export class JobQueue extends EventEmitter {
       downloadedBytes: 0,
       totalBytes: input.sizeBytes ?? null,
       retries: 0,
+      yieldedFor: null,
       speed: 0,
       peers: 0,
       messages: [],
@@ -230,6 +249,11 @@ export class JobQueue extends EventEmitter {
     // 不 await：立即把控制权还给 HTTP 处理
     void this.#drain();
     return job;
+  }
+
+  /** 注入「该不该让路」的探测（构造之后也能设，方便上层按需接上）。 */
+  setYieldProbe(probe: () => string | null): void {
+    this.#deps.yieldTo = probe;
   }
 
   list(): DownloadJob[] {
@@ -371,6 +395,36 @@ export class JobQueue extends EventEmitter {
     // 续传时要能分辨「这次真的又下到了东西」还是「一上来就被暂停/取消」
     const bytesAtStart = job.downloadedBytes;
 
+    /*
+     * 让路检查：新播出的剧集正在下时，补番先停下来。
+     * 每 20 秒看一眼，让路期间不做任何下载，等自动追番下完会自动恢复。
+     */
+    const yieldTimer = setInterval(() => {
+      const busyWith = this.#deps.yieldTo?.() ?? null;
+      if (busyWith === null) return;
+      job.yieldedFor = busyWith;
+      job.lastStop = 'paused';
+      this.#note(job, `让路给新播出的剧集（${busyWith}），它下完会自动继续`);
+      controller.abort();
+    }, this.#deps.yieldCheckMs ?? 20_000);
+
+    /*
+     * 开工前也看一眼：新番正等着下的话，这个任务先别启动。
+     *
+     * 注意**不能**把它推回 #pending —— 那会让 #drain 的 while 立刻又把它取出来、
+     * 又让路、又推回去，变成占满 CPU 的死循环（写测试时就是这么挂住的）。
+     * 正确做法：留在队列外面，交给定时器在新番下完后重新排队。
+     */
+    const busyBeforeStart = this.#deps.yieldTo?.() ?? null;
+    if (busyBeforeStart !== null) {
+      clearInterval(yieldTimer);
+      job.yieldedFor = busyBeforeStart;
+      this.#note(job, `先让路给新播出的剧集（${busyBeforeStart}），它下完会自动开始`);
+      this.#setStatus(job, 'queued');
+      this.#scheduleYieldCheck();
+      return;
+    }
+
     try {
       const hooks = jobHooks(job, (bytes) => this.#progress.set(job.id, bytes));
       const dispatch = this.#deps.dispatch ?? dispatchDownload;
@@ -403,7 +457,11 @@ export class JobQueue extends EventEmitter {
       const message = error instanceof Error ? error.message : String(error);
       const gained = Math.max(0, job.downloadedBytes - bytesAtStart);
 
-      if (job.lastStop === 'paused') {
+      if (job.yieldedFor) {
+        // 让路导致的暂停：等自动追番下完自动接上，不需要用户点继续
+        this.#setStatus(job, 'paused');
+        this.#scheduleYieldCheck();
+      } else if (job.lastStop === 'paused') {
         this.#setStatus(job, 'paused');
         this.#note(job, '已暂停，点继续会从这里接着下');
       } else if (job.lastStop === 'cancelled') {
@@ -439,6 +497,7 @@ export class JobQueue extends EventEmitter {
       }
       if (gained > 0) this.#note(job, `本轮新增 ${(gained / 1048576).toFixed(1)} MB（会保留）`);
     } finally {
+      clearInterval(yieldTimer);
       this.#controllers.delete(job.id);
       this.#progress.delete(job.id);
       if (job.status !== 'paused' && job.status !== 'queued') {
@@ -461,6 +520,37 @@ export class JobQueue extends EventEmitter {
     // 明显的配置/环境错误没必要重试
     if (/没有可下载的候选|不支持|未初始化|savePath/.test(message)) return false;
     return true;
+  }
+
+  /** 让路结束后自动把暂停的任务接上（每 60 秒看一次，别一直占着定时器）。 */
+  #scheduleYieldCheck(): void {
+    if (this.#yieldTimer) return;
+    this.#yieldTimer = setInterval(() => {
+      const busy = this.#deps.yieldTo?.() ?? null;
+      const waiting = [...this.#jobs.values()].filter(
+        (job) => job.yieldedFor && (job.status === 'paused' || job.status === 'queued')
+      );
+      if (busy !== null) return;
+      if (waiting.length === 0) {
+        clearInterval(this.#yieldTimer as ReturnType<typeof setInterval>);
+        this.#yieldTimer = null;
+        return;
+      }
+      for (const job of waiting) {
+        job.yieldedFor = null;
+        job.lastStop = null;
+        this.#note(job, '新播出的剧集下完了，继续');
+        if (job.status === 'paused') {
+          this.act(job.id, 'resume');
+        } else {
+          // 还没开始过的：重新排进队列
+          this.#pending.push(job.id);
+        }
+      }
+      void this.#drain();
+    }, this.#deps.yieldResumeMs ?? 60_000);
+    // 别让这个定时器拖住进程退出（测试里尤其明显）
+    (this.#yieldTimer as { unref?: () => void }).unref?.();
   }
 
   #note(job: DownloadJob, message: string): void {

@@ -1224,6 +1224,27 @@ function ensureJobs(deps: WebDeps): JobQueue {
       qbittorrent: deps.qbittorrent,
       statePath: queueFile
     });
+    /*
+     * 让路：自动追番（另一个进程）正在下新播出的剧集时，队列里的补番暂停。
+     * 用户的要求是「优先下载新播出的」—— 新番刚出种正需要抢速度，
+     * 补番晚几分钟没有损失。判断依据是计划文件里那份实时进度（10 秒写一次）。
+     */
+    deps.jobs.setYieldProbe?.(() => {
+      if (!deps.configPath) return null;
+      let state;
+      try {
+        state = loadAutoSchedule(autoSchedulePath(deps.configPath));
+      } catch {
+        return null;
+      }
+      const running = effectiveRunning(state);
+      if (!running) return null;
+      // 记录超过 90 秒没更新 = 那个进程多半已经没了，别一直让路
+      const age = Date.now() - new Date(running.updatedAt).getTime();
+      if (!Number.isFinite(age) || age > 90_000) return null;
+      return running.title.length > 42 ? `${running.title.slice(0, 42)}…` : running.title;
+    });
+
     const restored = deps.jobs.restore();
     if (restored > 0) log.info(`启动时恢复了 ${restored} 个没下完的下载任务`);
   }

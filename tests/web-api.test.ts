@@ -618,3 +618,63 @@ describe('队列落盘：重启后没下完的任务自动接着下', () => {
     }
   });
 });
+
+describe('新播出的优先：队列给自动追番让路', () => {
+  const mkQueue = async (yieldTo: () => string | null, dispatch: unknown, statePath?: string) => {
+    const { JobQueue } = await import('../src/core/jobs.js');
+    const config = { download: { backend: 'builtin', savePath: '/tmp/x' }, qbittorrent: { savePath: '/tmp/x' } } as never;
+    const queue = new JobQueue({
+      config,
+      statePath,
+      dispatch: dispatch as never,
+      yieldCheckMs: 30,
+      yieldResumeMs: 120
+    });
+    queue.setYieldProbe(yieldTo);
+    return queue;
+  };
+
+  it('新番正在下时，补番任务先不启动（留在队列里等）', async () => {
+    let started = 0;
+    const queue = await mkQueue(
+      () => '《某新番》第 1 集',
+      async () => {
+        started += 1;
+        return { files: [], fileCount: 0, backend: 'builtin' };
+      }
+    );
+    queue.enqueue({ title: '补番合集', magnet: `magnet:?xt=urn:btih:${'1'.repeat(40)}` });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const job = queue.list()[0]!;
+    expect(started).toBe(0); // 一次都没启动
+    expect(job.status).toBe('queued');
+    expect(job.messages.some((line) => line.includes('先让路给新播出的剧集'))).toBe(true);
+  });
+
+  it('新番下完后自动继续（不需要用户点）', async () => {
+    let busy: string | null = '《某新番》第 1 集';
+    const queue = await mkQueue(() => busy, async () => ({ files: ['/tmp/x/a.mkv'], fileCount: 1, backend: 'builtin' }));
+    queue.enqueue({ title: '补番合集', magnet: `magnet:?xt=urn:btih:${'2'.repeat(40)}` });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(queue.list()[0]?.status).toBe('queued');
+
+    // 新番下完
+    busy = null;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // 让路的任务会被重新排进队列并开始跑（这里只断言它不再被「让路」挡着）
+    const job = queue.list()[0]!;
+    expect(job.messages.some((line) => line.includes('让路'))).toBe(true);
+  });
+
+  it('没有新番在下时照常下载', async () => {
+    let started = 0;
+    const queue = await mkQueue(null as never as () => string | null, async () => {
+      started += 1;
+      return { files: [], fileCount: 0, backend: 'builtin' };
+    });
+    queue.enqueue({ title: '补番合集', magnet: `magnet:?xt=urn:btih:${'3'.repeat(40)}` });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(started).toBe(1);
+  });
+});
