@@ -7,6 +7,7 @@ import { selectFileIndexes, downloadTorrentBytes } from './push.js';
 import { metaFromInfoBytes, parseTorrentFile, type TorrentMeta } from '../bittorrent/metainfo.js';
 import { locateTorrent } from './verify.js';
 import { pickViableCandidate } from './viable.js';
+import { showNameFromTitle } from '../util/text.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
@@ -60,6 +61,8 @@ export type FallbackOptions = {
   minResumeGainBytes?: number;
   /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
   configPath?: string;
+  /** 番剧名：单集种子用它当目录名（同一部番的剧集放一起）。 */
+  seriesName?: string;
   /** 探活实现（默认问公共 tracker，测试可替换）。 */
   probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<import('./viable.js').SeederProbe>;
   /** 下载过程中的进度回调（界面上的「正在下载」用它）。 */
@@ -603,7 +606,24 @@ async function runAttempt(
   const existing = await metadataFor(candidate, options)
     .then((meta) => (meta ? locateTorrent(meta, options.savePath, options.config.download.seriesDir) : null))
     .catch(() => null);
-  const singleFileDir = existing?.exists ? existing.singleFileDir : candidate.result.title;
+  /*
+   * 单集种子放哪个文件夹。
+   *
+   * 优先级：
+   *   1. 磁盘上已经有的那份（续传要用它原来的目录，否则同一集会落成两份）
+   *   2. 调用方给的番剧名（自动追番从 Planner 拿到的名字，例如「相反的你和我 第二季」）
+   *   3. 从发布标题里猜出来的番剧名
+   *   4. 实在猜不出来才用发布标题
+   *
+   * 用户的要求是「新番不要每集新建文件夹，视频直接放在番剧文件夹里方便整理观看」——
+   * 所以同一部番的每一集都进同一个目录，而不是一集一个以发布标题命名的目录。
+   */
+  const singleFileDir =
+    existing?.exists
+      ? existing.singleFileDir
+      : options.seriesName?.trim() ||
+        showNameFromTitle(candidate.result.title) ||
+        candidate.result.title;
 
   const downloader = new TorrentDownloader({
     magnet: candidate.result.magnet || undefined,

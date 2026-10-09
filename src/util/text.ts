@@ -110,3 +110,42 @@ export function shiftDate(date: string, days: number): string {
   const pad = (input: number) => String(input).padStart(2, '0');
   return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
 }
+
+/**
+ * 从发布标题里猜出「这是哪部番」，用来给单集找个统一的存放目录。
+ *
+ * 起因：单集种子原来一集建一个文件夹（名字就是发布标题），
+ * 用户抱怨「新番不要每集新建文件夹，视频直接放在番剧文件夹里方便整理观看」。
+ *
+ * 处理顺序：
+ *   1. 去掉开头的「[字幕组]」标签
+ *   2. 去掉所有 [..]、（..）里的技术标签
+ *   3. 从集号处截断（「- 25」「第25集」「S01E25」「E25」）
+ *   4. 去掉画质/编码/字幕类词
+ * 猜不出来（结果太短）就返回 null，交给调用方用原来的发布标题兜底。
+ */
+export function showNameFromTitle(title: string): string | null {
+  let text = title.trim();
+  if (text === '') return null;
+
+  text = text.replace(/^(?:\s*\[[^\]]*\]\s*)+/, ' ');
+  text = text.replace(/[[(（【][^\])）】]*[\])）】]/g, ' ');
+
+  // 集号及之后的内容都截掉：S01E25 / 第25集 / - 25 / 25话 / E25
+  const episodeMark = /(?:s\d{1,2}\s*e\d{1,3}|第\s*\d+\s*[集话話]|e\d{1,3}(?![\dA-Za-z])|\s[-–—]\s*\d{1,3}(?![\dA-Za-z])|\s\d{1,3}\s*[集话話])/i;
+  const cut = episodeMark.exec(text);
+  if (cut && cut.index > 0) text = text.slice(0, cut.index);
+
+  text = text
+    // 10-bit / 8-bit 这类写法也要去掉（\b 对 "10-bit" 不管用）
+    .replace(/\b\d{1,2}\s*-\s*bit\b/gi, ' ')
+    .replace(/\b(?:1080p?|720p?|2160p?|480p?|4k|bdrip|bdremux|bd|web-?dl|webrip|web|hevc|avc|h\.?264|h\.?265|x264|x265|10bit|8bit|aac|flac|opus|mkv|mp4|av1)\b/gi, ' ')
+    .replace(/(?:简繁|简日|繁日|简繁日|中日|双语|内封|内嵌|外挂|字幕|合集|全集|招募|新番|仅限港澳台地区)/g, ' ')
+    .replace(/[／/|｜·・]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 结尾常剩下一个孤零零的连字符或点
+  text = text.replace(/[\s\-–—_.]+$/, '').trim();
+  return text.length >= 2 ? text : null;
+}

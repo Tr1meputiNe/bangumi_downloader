@@ -525,3 +525,25 @@ describe('直链失效时的自救：按标题找回磁力', () => {
     }
   });
 });
+
+describe('单集放进「番剧/<番剧名>/」而不是一集一个文件夹', () => {
+  it('从发布标题里认出番剧名（去掉字幕组标签/集号/技术标签）', async () => {
+    const { showNameFromTitle } = await import('../src/util/text.js');
+    // 用户的要求：新番不要每集新建文件夹，视频直接放在番剧文件夹里方便整理观看
+    expect(showNameFromTitle('[ANi] Seihantai na Kimi to Boku S02 - 25 [1080P][Baha][WEB-DL]')).toBe(
+      'Seihantai na Kimi to Boku S02'
+    );
+    expect(showNameFromTitle('[黒ネズミたち] 相反的你和我 第二季 - 13 (CR 1920x1080 AVC AAC MKV)')).toBe(
+      '相反的你和我 第二季'
+    );
+    expect(showNameFromTitle('[千夏字幕组&VCB-Studio] 特别篇 吹响！上低音号～合奏比赛～ 10-bit 1080p HEVC BDRip')).toBe(
+      '特别篇 吹响！上低音号～合奏比赛～'
+    );
+  });
+
+  it('认不出来就返回 null（交给调用方用发布标题兜底，不硬造一个怪名字）', async () => {
+    const { showNameFromTitle } = await import('../src/util/text.js');
+    expect(showNameFromTitle('')).toBeNull();
+    expect(showNameFromTitle('[1080p]')).toBeNull();
+  });
+});

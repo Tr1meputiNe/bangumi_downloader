@@ -397,6 +397,8 @@ async function runFromPlanner(
       const outcome = await downloadForGap(gap, {
         config,
         savePath,
+        // 单集都放进「番剧/<番剧名>/」，不要一集一个文件夹
+        seriesName: name,
         dryRun: options.dryRun,
         maxPerSubject,
         retryRounds: options.retryRounds,
@@ -551,6 +553,8 @@ async function downloadForGap(gap: AnimeGap, options: {
   onCompleted?: (episodes: number[]) => void;
   /** config.json 的路径（跨进程去重用）。 */
   configPath?: string;
+  /** 番剧名（单集种子用它当目录名）。 */
+  seriesName?: string;
   /** 下载进度（界面展示用）。 */
   onProgress?: (info: {
     title: string;
@@ -665,6 +669,7 @@ async function downloadForGap(gap: AnimeGap, options: {
     candidates: [...outcome.ranked, ...relaxed],
     config,
     configPath: options.configPath,
+    seriesName: options.seriesName,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,
@@ -762,6 +767,8 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
       const outcome = await runForEntry(entry, {
         config,
         configPath: options.configPath,
+        // 兜底清单也走同一套：单集放进「番剧/<番剧名>/」
+        seriesName: entry.query,
         savePath,
         dryRun: options.dryRun,
         maxPerSubject,
@@ -820,6 +827,8 @@ async function runForEntry(
     config: AppConfig;
     /** config.json 的路径（跨进程去重用）。 */
     configPath?: string;
+    /** 番剧名（单集种子用它当目录名）。 */
+    seriesName?: string;
     savePath: string;
     dryRun: boolean;
     maxPerSubject: number;
@@ -915,6 +924,7 @@ async function runForEntry(
     candidates: outcome.ranked,
     config,
     configPath: options.configPath,
+    seriesName: options.seriesName,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,

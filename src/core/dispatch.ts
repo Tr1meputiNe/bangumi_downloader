@@ -8,6 +8,7 @@ import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { searchAndRank } from './search.js';
+import { showNameFromTitle } from '../util/text.js';
 import { probeSeeders } from './viable.js';
 
 const log = logger('dispatch');
@@ -261,7 +262,14 @@ async function downloadWithBuiltinClaimed(
    * 单文件种子用发布名当文件夹名 —— 否则单集会散落在下载根目录里。
    */
   const seriesRoot = config.download.seriesDir?.trim() || undefined;
-  const singleFileDir = input.title;
+  /*
+   * 单集种子放哪个目录：优先从标题里认出的番剧名，认不出才用发布标题。
+   * 这样手动下的新番也会和自动追番下的进同一个文件夹（同名时）。
+   */
+  const singleFileDir = showNameFromTitle(input.title) ?? input.title;
+  if (singleFileDir !== input.title) {
+    hooks.onLog?.(`单集归入番剧目录：《${singleFileDir}》`);
+  }
 
   const downloader = new TorrentDownloader({
     magnet: magnet || undefined,
