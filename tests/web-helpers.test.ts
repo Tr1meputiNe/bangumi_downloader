@@ -547,3 +547,24 @@ describe('单集放进「番剧/<番剧名>/」而不是一集一个文件夹', 
     expect(showNameFromTitle('[1080p]')).toBeNull();
   });
 });
+
+describe('新番按月归档（番剧/2026_10/xxx.mkv）', () => {
+  it('月份目录名格式正确，跨年也对', async () => {
+    const { monthFolder } = await import('../src/util/text.js');
+    expect(monthFolder(new Date(2026, 9, 5))).toBe('2026_10'); // 10 月
+    expect(monthFolder('2026-01-03')).toBe('2026_01');
+    expect(monthFolder('2026-12-31T13:00:00Z')).toMatch(/^2026_12|2027_01$/); // 时区边界都算合理
+    expect(monthFolder(null)).toMatch(/^\d{4}_\d{2}$/);
+  });
+
+  it('单集 vs 剧场版：只有单集才进当月目录', async () => {
+    const { hasEpisodeMarker } = await import('../src/util/text.js');
+    // 单集（新番）
+    expect(hasEpisodeMarker('[ANi] Seihantai na Kimi to Boku S02 - 25 [1080P]')).toBe(true);
+    expect(hasEpisodeMarker('【極影字幕社】吹響吧！上低音號 第三季 第01話 BIG5 1080P')).toBe(true);
+    expect(hasEpisodeMarker('[Nix-Raws] Xxx S01E25 [CR WEB-DL]')).toBe(true);
+    // 剧场版/OVA/合集不该被当成单集（否则 2016 年的电影会被塞进 2026_10）
+    expect(hasEpisodeMarker('[千夏字幕组&VCB-Studio] 特别篇 吹响！上低音号～合奏比赛～ 10-bit 1080p')).toBe(false);
+    expect(hasEpisodeMarker('[Airota&VCB-Studio] Gekijouban Hibike! Euphonium Chikai no Finale [Ma10p_1080p]')).toBe(false);
+  });
+});

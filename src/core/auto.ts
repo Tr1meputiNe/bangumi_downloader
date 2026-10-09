@@ -397,8 +397,9 @@ async function runFromPlanner(
       const outcome = await downloadForGap(gap, {
         config,
         savePath,
-        // 单集都放进「番剧/<番剧名>/」，不要一集一个文件夹
+        // 新番按月归档（番剧/2026_10/…），非单集用番剧名
         seriesName: name,
+        airDate: gap.episodeMeta.get(gap.missingEpisodes[0] ?? 0)?.airdate ?? null,
         dryRun: options.dryRun,
         maxPerSubject,
         retryRounds: options.retryRounds,
@@ -553,8 +554,10 @@ async function downloadForGap(gap: AnimeGap, options: {
   onCompleted?: (episodes: number[]) => void;
   /** config.json 的路径（跨进程去重用）。 */
   configPath?: string;
-  /** 番剧名（单集种子用它当目录名）。 */
+  /** 番剧名（非单集种子用它当目录名）。 */
   seriesName?: string;
+  /** 这一集的播出日期（决定新番归到哪个月）。 */
+  airDate?: string | null;
   /** 下载进度（界面展示用）。 */
   onProgress?: (info: {
     title: string;
@@ -670,6 +673,7 @@ async function downloadForGap(gap: AnimeGap, options: {
     config,
     configPath: options.configPath,
     seriesName: options.seriesName,
+    airDate: options.airDate,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,
@@ -767,8 +771,9 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
       const outcome = await runForEntry(entry, {
         config,
         configPath: options.configPath,
-        // 兜底清单也走同一套：单集放进「番剧/<番剧名>/」
+        // 兜底清单也走同一套：单集按月归档
         seriesName: entry.query,
+        airDate: null,
         savePath,
         dryRun: options.dryRun,
         maxPerSubject,
@@ -827,8 +832,10 @@ async function runForEntry(
     config: AppConfig;
     /** config.json 的路径（跨进程去重用）。 */
     configPath?: string;
-    /** 番剧名（单集种子用它当目录名）。 */
+    /** 番剧名（非单集种子用它当目录名）。 */
     seriesName?: string;
+    /** 这一集的播出日期（决定新番归到哪个月）。 */
+    airDate?: string | null;
     savePath: string;
     dryRun: boolean;
     maxPerSubject: number;
@@ -925,6 +932,7 @@ async function runForEntry(
     config,
     configPath: options.configPath,
     seriesName: options.seriesName,
+    airDate: options.airDate,
     episodes: wanted,
     savePath: options.savePath,
     rounds: options.retryRounds,

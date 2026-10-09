@@ -48,7 +48,11 @@ export type RetryOptions = {
   refreshCandidates?: () => Promise<readonly ScoredCandidate[]>;
   /** 续传那一份每轮最多先给多久（毫秒）。 */
   resumeSliceMs?: number;
-  /** 番剧名（单集目录用）。 */
+  /** 单集目录（显式指定时优先）。 */
+  singleFileDir?: string;
+  /** 这一集的播出日期（决定归档月份）。 */
+  airDate?: string | null;
+  /** 番剧名（非单集目录用）。 */
   seriesName?: string;
   /** 探活实现（测试可替换）。 */
   probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<import('./viable.js').SeederProbe>;
@@ -108,6 +112,8 @@ export async function downloadUntilComplete(options: RetryOptions): Promise<Retr
         resumeSliceMs: options.resumeSliceMs,
         probe: options.probe,
         seriesName: options.seriesName,
+        singleFileDir: options.singleFileDir,
+        airDate: options.airDate,
         onProgress: options.onProgress,
         // 第一轮看有没有历史进度；后面几轮必然要看，因为上一轮就是我们自己下的
         probeExisting: true

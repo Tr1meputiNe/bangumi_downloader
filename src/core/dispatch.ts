@@ -8,7 +8,7 @@ import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { searchAndRank } from './search.js';
-import { showNameFromTitle } from '../util/text.js';
+import { hasEpisodeMarker, monthFolder, showNameFromTitle } from '../util/text.js';
 import { probeSeeders } from './viable.js';
 
 const log = logger('dispatch');
@@ -263,13 +263,16 @@ async function downloadWithBuiltinClaimed(
    */
   const seriesRoot = config.download.seriesDir?.trim() || undefined;
   /*
-   * 单集种子放哪个目录：优先从标题里认出的番剧名，认不出才用发布标题。
-   * 这样手动下的新番也会和自动追番下的进同一个文件夹（同名时）。
+   * 单集种子放哪个目录：
+   *   - 单集（标题里带集号，新番基本都是这种）-> 按月归档：番剧/2026_10/xxx.mkv
+   *   - 剧场版/OVA/合集这类 -> 用认出来的番剧名建目录
+   *   - 都认不出来 -> 用发布标题兜底
+   * 用户的要求就是「新番不要每集新建文件夹，直接按月归纳好方便整理观看」。
    */
-  const singleFileDir = showNameFromTitle(input.title) ?? input.title;
-  if (singleFileDir !== input.title) {
-    hooks.onLog?.(`单集归入番剧目录：《${singleFileDir}》`);
-  }
+  const singleFileDir = hasEpisodeMarker(input.title)
+    ? monthFolder(null)
+    : showNameFromTitle(input.title) ?? input.title;
+  hooks.onLog?.(`归入目录：番剧/${singleFileDir}/（单集按月归档）`);
 
   const downloader = new TorrentDownloader({
     magnet: magnet || undefined,

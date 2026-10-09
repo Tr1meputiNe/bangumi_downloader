@@ -149,3 +149,30 @@ export function showNameFromTitle(title: string): string | null {
   text = text.replace(/[\s\-–—_.]+$/, '').trim();
   return text.length >= 2 ? text : null;
 }
+
+/**
+ * 新番按月归档的目录名：`2026_10`。
+ *
+ * 用户的要求：新番别一集一个文件夹，直接按月份归纳好，方便自己整理观看
+ * （他手工就是这么做的：`番剧/2026_10/`）。
+ *
+ * 传日期（优先用这一集的播出日期，其次当前时间）。
+ */
+export function monthFolder(when: Date | string | null | undefined): string {
+  const date = when instanceof Date ? when : when ? new Date(when) : new Date();
+  const valid = Number.isNaN(date.getTime()) ? new Date() : date;
+  const month = String(valid.getMonth() + 1).padStart(2, '0');
+  return `${valid.getFullYear()}_${month}`;
+}
+
+/**
+ * 标题看起来是不是「单集」（而不是剧场版/OVA/合集）。
+ *
+ * 用来决定归档方式：单集进当月目录（新番就是这么来的），
+ * 剧场版/特别篇仍然单独给一个目录 —— 否则 2016 年的电影会被塞进 `2026_10` 里。
+ */
+export function hasEpisodeMarker(title: string): boolean {
+  return /(?:s\d{1,2}\s*e\d{1,3}|第\s*\d+\s*[集话話]|\s[-–—]\s*\d{1,3}(?![\dA-Za-z])|\[\d{1,3}(?:v\d)?\]|\bE\d{1,3}\b)/i.test(
+    title
+  );
+}

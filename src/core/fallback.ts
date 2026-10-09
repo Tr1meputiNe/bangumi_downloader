@@ -7,7 +7,7 @@ import { selectFileIndexes, downloadTorrentBytes } from './push.js';
 import { metaFromInfoBytes, parseTorrentFile, type TorrentMeta } from '../bittorrent/metainfo.js';
 import { locateTorrent } from './verify.js';
 import { pickViableCandidate } from './viable.js';
-import { showNameFromTitle } from '../util/text.js';
+import { hasEpisodeMarker, monthFolder, showNameFromTitle } from '../util/text.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { formatSize } from '../util/text.js';
 import { logger } from '../util/log.js';
@@ -61,7 +61,11 @@ export type FallbackOptions = {
   minResumeGainBytes?: number;
   /** config.json 的路径：用来定位跨进程的「正在下载」登记簿。 */
   configPath?: string;
-  /** 番剧名：单集种子用它当目录名（同一部番的剧集放一起）。 */
+  /** 单集种子放哪个目录（不填则单集按月份归档、非单集用番剧名）。 */
+  singleFileDir?: string;
+  /** 这一集的播出日期（用来决定归档到哪个月）。 */
+  airDate?: string | null;
+  /** 番剧名：非单集（剧场版/OVA）用它当目录名。 */
   seriesName?: string;
   /** 探活实现（默认问公共 tracker，测试可替换）。 */
   probe?: (infoHash: string, options: { timeoutMs?: number; signal?: AbortSignal }) => Promise<import('./viable.js').SeederProbe>;
@@ -621,8 +625,10 @@ async function runAttempt(
   const singleFileDir =
     existing?.exists
       ? existing.singleFileDir
-      : options.seriesName?.trim() ||
-        showNameFromTitle(candidate.result.title) ||
+      : options.singleFileDir?.trim() ||
+        (hasEpisodeMarker(candidate.result.title)
+          ? monthFolder(options.airDate ?? null)
+          : showNameFromTitle(candidate.result.title)) ||
         candidate.result.title;
 
   const downloader = new TorrentDownloader({
