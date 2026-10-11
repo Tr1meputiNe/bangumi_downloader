@@ -48,6 +48,17 @@ export type AutoDoneRecord = {
   at: string;
 };
 
+/**
+ * 自动追番**当前在干什么**（不止是「在下载」，也包括搜索、算计划这些）。
+ *
+ * 用户抱怨「自动跑的任务不在任务列表里，不方便看」—— 自动追番在另一个进程，
+ * 它的动作只写进日志。有了这个字段，网页那条任务列表就能把它的实时状态显示出来。
+ */
+export type AutoActivity = {
+  text: string;
+  at: string;
+};
+
 export type AutoScheduleState = {
   version: 1;
   updatedAt: string;
@@ -79,6 +90,8 @@ export type AutoScheduleState = {
    * 只能去翻日志。实测用户就是因此以为「一直是 0 MB、没在动」。
    */
   running?: RunningDownload | null;
+  /** 当前动作（正在检查清单 / 正在搜索某集 / 正在下载 / 本轮结束…）。 */
+  activity?: AutoActivity | null;
 };
 
 export type RunningDownload = {
@@ -116,7 +129,8 @@ export function emptyScheduleState(now: Date): AutoScheduleState {
     triggers: [],
     done: [],
     lastSkipReason: null,
-    running: null
+    running: null,
+    activity: null
   };
 }
 
@@ -153,6 +167,13 @@ export function clearStaleRunning(path: string): boolean {
   return true;
 }
 
+/** 记一条「自动追番现在在干什么」（界面上的任务列表会显示）。 */
+export function publishActivity(path: string, text: string): void {
+  const state = loadAutoSchedule(path);
+  state.activity = { text, at: new Date().toISOString() };
+  saveAutoSchedule(path, state);
+}
+
 /** 下载结束后清掉「正在下载」。 */
 export function clearRunning(path: string): void {
   const state = loadAutoSchedule(path);
@@ -182,6 +203,10 @@ export function loadAutoSchedule(path: string, now: Date = new Date()): AutoSche
       running:
         raw.running && typeof raw.running === 'object' && typeof (raw.running as RunningDownload).title === 'string'
           ? (raw.running as RunningDownload)
+          : null,
+      activity:
+        raw.activity && typeof raw.activity === 'object' && typeof (raw.activity as AutoActivity).text === 'string'
+          ? (raw.activity as AutoActivity)
           : null
     };
   } catch (error) {

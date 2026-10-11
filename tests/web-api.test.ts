@@ -678,3 +678,64 @@ describe('新播出的优先：队列给自动追番让路', () => {
     expect(started).toBe(1);
   });
 });
+
+async function runJobs(config: unknown, configPath: string): Promise<{
+  jobs: Array<Record<string, unknown>>;
+  auto?: { running: boolean; activity: string | null };
+}> {
+  const { startWebServer } = await import('../src/web/server.js');
+  const started = await startWebServer({ config: config as never, configPath, qbittorrent: undefined });
+  try {
+    const response = await fetch(`${started.url.replace(/\/$/, '')}/api/jobs`);
+    return (await response.json()) as never;
+  } finally {
+    await started.close();
+  }
+}
+
+describe('自动追番的任务也出现在任务列表里', () => {
+  it('/api/jobs 带上自动追番的状态和它的下载条目（只读）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'auto-jobs-'));
+    try {
+      const configPath = join(dir, 'config.json');
+      writeFileSync(configPath, JSON.stringify(loadConfig({} as never)), 'utf8');
+      const { config } = loadConfig({ configPath });
+
+      // 造一份「自动追番正在下载」的计划文件（它平时由另一个进程写）
+      const { autoSchedulePath, loadAutoSchedule, saveAutoSchedule, publishActivity, publishRunning } = await import(
+        '../src/core/auto-schedule.js'
+      );
+      const schedulePath = autoSchedulePath(configPath);
+      publishActivity(schedulePath, '正在找《某番》第 3 集的片源');
+      publishRunning(schedulePath, {
+        title: '《某番》第 3 集',
+        ratio: 0.4,
+        downloadedBytes: 400 * 1048576,
+        totalBytes: 1000 * 1048576,
+        speed: 500 * 1024,
+        peers: 12,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      // done 里记一集，验证「最近下完的」也会列出来
+      const state = loadAutoSchedule(schedulePath);
+      state.done.push({ subjectId: 1, episode: 2, query: '某番', at: new Date().toISOString() });
+      saveAutoSchedule(schedulePath, state);
+
+      const result = await runJobs(config, configPath);
+      const auto = result.jobs.filter((job) => job.source === 'auto');
+      // 一条正在下载 + 一条最近完成
+      expect(auto).toHaveLength(2);
+      const current = auto.find((job) => job.status === 'running')!;
+      expect(current.title).toContain('第 3 集');
+      expect(current.percent).toBeCloseTo(40, 0);
+      // 只读：不提供暂停/取消（它跑在另一个进程里，点了也没用）
+      expect(current.canPause).toBe(false);
+      expect(current.canCancel).toBe(false);
+      expect(result.auto?.activity).toContain('正在找');
+      expect(result.auto?.running).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

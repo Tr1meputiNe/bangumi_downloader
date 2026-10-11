@@ -485,7 +485,9 @@ function handleJobs(deps: WebDeps, response: ServerResponse): void {
   const queue = ensureJobs(deps);
   const jobs = queue.list();
   sendJson(response, 200, {
-    jobs: jobs.map(toJobView),
+    jobs: [...jobs.map(toJobView), ...autoJobViews(deps)],
+    /** 自动追番（另一个进程）在干什么 —— 它的下载不进队列，单独给一份。 */
+    auto: autoStatusView(deps),
     running: queue.running,
     counts: {
       running: jobs.filter((job) => job.status === 'running').length,
@@ -496,6 +498,107 @@ function handleJobs(deps: WebDeps, response: ServerResponse): void {
       cancelled: jobs.filter((job) => job.status === 'cancelled').length
     }
   });
+}
+
+/**
+ * 自动追番的实时状态。
+ *
+ * 用户抱怨「自动跑的任务不会在任务列表里，不方便看」：自动追番是计划任务触发的
+ * 另一个进程，它的下载走的是自带的候选回退逻辑，不经过网页的任务队列，
+ * 所以任务页里什么都看不到 —— 只能去翻日志。
+ * 它本来就会把进度和当前动作写进计划文件，这里读出来展示即可。
+ */
+function autoStatusView(deps: WebDeps): {
+  running: boolean;
+  activity: string | null;
+  activityAt: string | null;
+  taskRunning: boolean;
+  nextCheckText: string | null;
+} {
+  if (!deps.configPath) return { running: false, activity: null, activityAt: null, taskRunning: false, nextCheckText: null };
+  let state;
+  try {
+    state = loadAutoSchedule(autoSchedulePath(deps.configPath));
+  } catch {
+    return { running: false, activity: null, activityAt: null, taskRunning: false, nextCheckText: null };
+  }
+  const running = effectiveRunning(state);
+  const runner = deps.tasks;
+  const taskRunning = runner ? runner.list().some((task) => task.status === 'running' && task.kind === 'auto') : false;
+  return {
+    running: running !== null,
+    activity: state.activity?.text ?? null,
+    activityAt: state.activity?.at ?? null,
+    taskRunning,
+    nextCheckText: state.nextCheckAt ? new Date(state.nextCheckAt).toISOString() : null
+  };
+}
+
+/**
+ * 把自动追番的下裁也做成任务条目，和队列任务并排显示。
+ *
+ * 都是**只读**的：它跑在另一个进程里，网页既不能暂停也不能取消它
+ * （不能假装能点 —— 点了没反应比没有按钮更糟）。
+ */
+function autoJobViews(deps: WebDeps): unknown[] {
+  if (!deps.configPath) return [];
+  let state;
+  try {
+    state = loadAutoSchedule(autoSchedulePath(deps.configPath));
+  } catch {
+    return [];
+  }
+  const views: unknown[] = [];
+  const running = effectiveRunning(state);
+  if (running) {
+    const total = running.totalBytes > 0 ? running.totalBytes : null;
+    views.push({
+      id: 'auto:current',
+      title: running.title,
+      status: 'running',
+      source: 'auto',
+      percent: total === null ? running.ratio * 100 : (running.downloadedBytes / total) * 100,
+      downloadedBytes: running.downloadedBytes,
+      totalBytes: total,
+      speed: running.speed,
+      peers: running.peers,
+      episodes: [],
+      messages: [`自动追番（计划任务进程）：${state.activity?.text ?? '正在下载'}`],
+      files: [],
+      error: null,
+      backend: 'builtin',
+      startedAt: running.startedAt,
+      finishedAt: null,
+      canPause: false,
+      canResume: false,
+      canCancel: false
+    });
+  }
+  // 最近下完的几集也列出来，方便回看「自动都下了些什么」
+  for (const record of [...state.done].slice(-5).reverse()) {
+    views.push({
+      id: `auto:done:${record.subjectId ?? 'x'}:${record.episode ?? 0}`,
+      title: `${record.query} 第 ${record.episode ?? '?'} 集`,
+      status: 'completed',
+      source: 'auto',
+      percent: 100,
+      downloadedBytes: 0,
+      totalBytes: null,
+      speed: 0,
+      peers: 0,
+      episodes: record.episode === null ? [] : [record.episode],
+      messages: [`自动追番完成于 ${record.at}`],
+      files: [],
+      error: null,
+      backend: 'builtin',
+      startedAt: null,
+      finishedAt: record.at,
+      canPause: false,
+      canResume: false,
+      canCancel: false
+    });
+  }
+  return views;
 }
 
 /** 任务的对外视图（去掉内部字段，进度换算成百分比）。 */

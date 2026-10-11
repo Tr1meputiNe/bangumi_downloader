@@ -102,6 +102,22 @@ export function JobsView() {
 
   return html`
     <div class="view">
+      ${store.auto && (store.auto.running || store.auto.activity)
+        ? html`
+            <div class=${`job auto-banner ${store.auto.running ? 'running' : ''}`}>
+              <div class="job-line">
+                <${Badge} kind=${store.auto.running ? 'ok' : ''}>自动追番</${Badge}>
+                <span class="job-title">${store.auto.activity ?? '正在下载'}</span>
+                ${store.auto.running ? html`<span class="job-eta">（计划任务进程，进度见下面的条目）</span>` : null}
+              </div>
+              <div class="job-detail">
+                计划任务触发的那个进程在跑，下载走的是它自己的候选回退逻辑，不经过这个队列 ——
+                所以这里只能看，暂停/取消请到「计划」页操作。
+              </div>
+            </div>
+          `
+        : null}
+
       <${Card}
         title="下载任务"
         hint="同一时间只跑一个：同时下多个会互相抢带宽，进度也更难看懂"
@@ -189,6 +205,7 @@ function JobRow({
   }
   detail.push(...[formatSpeed(job.speed), job.peers > 0 ? `${job.peers} 个 peer` : ''].filter((item) => item !== ''));
   if (job.episodes.length > 0) detail.push(`只下第 ${compactEpisodes(job.episodes)} 集`);
+  if (job.source === 'auto') detail.push('自动追番');
 
   /*
    * 「还要多久」：进度过半、有速度、总大小已知时才算。
@@ -207,6 +224,7 @@ function JobRow({
     <div class=${`job ${job.status}`}>
       <div class="job-line">
         <${Badge} kind=${JOB_BADGE[job.status]}>${JOB_LABELS[job.status]}</${Badge}>
+        ${job.source === 'auto' ? html`<${Badge}>自动</${Badge}>` : null}
         <span class="job-title" title=${job.title}>${job.title}</span>
         ${job.percent !== null && (job.status === 'running' || job.status === 'paused') &&
         html`<span class="job-percent">${job.percent.toFixed(1)}%</span>`}

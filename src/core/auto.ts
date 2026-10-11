@@ -18,6 +18,7 @@ import {
   applyPlan,
   autoSchedulePath,
   clearStaleRunning,
+  publishActivity,
   broadcastTimeOf,
   doneKeys,
   clearRunning,
@@ -388,11 +389,15 @@ async function runFromPlanner(
 
   const maxPerSubject = options.maxEpisodesPerSubject ?? config.download.maxEpisodesPerSubjectPerRun ?? 999;
   const roundStartedAt = new Date().toISOString();
+  if (options.configPath) publishActivity(autoSchedulePath(options.configPath), '正在检查追番清单与 Planner');
 
   try {
     for (const gap of gaps) {
     const name = displayName(gap.subject);
     report.checked += 1;
+    if (options.configPath) {
+      publishActivity(autoSchedulePath(options.configPath), `正在找《${name}》第 ${gap.missingEpisodes.join('、')} 集的片源`);
+    }
     try {
       const outcome = await downloadForGap(gap, {
         config,
@@ -442,7 +447,17 @@ async function runFromPlanner(
     }
   } finally {
     // 不管这一轮怎么结束，界面上的「正在下载」都要清掉
-    if (options.configPath) clearRunning(autoSchedulePath(options.configPath));
+    if (options.configPath) {
+      clearRunning(autoSchedulePath(options.configPath));
+      publishActivity(
+        autoSchedulePath(options.configPath),
+        report.downloaded.length > 0
+          ? `本轮结束：新下载 ${report.downloaded.length} 集`
+          : report.skipped.length > 0
+            ? `本轮结束：${report.skipped.length} 部跳过`
+            : '本轮结束：没有需要下载的集'
+      );
+    }
   }
 
   return report;

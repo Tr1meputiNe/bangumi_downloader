@@ -62,6 +62,14 @@ export type AddResponse = {
 
 export type JobStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
+export type AutoStatus = {
+  running: boolean;
+  activity: string | null;
+  activityAt: string | null;
+  taskRunning: boolean;
+  nextCheckText: string | null;
+};
+
 export type JobView = {
   id: string;
   title: string;
@@ -80,6 +88,8 @@ export type JobView = {
   files: string[];
   error: string | null;
   backend: string;
+  /** 'auto' = 自动追番（另一个进程）的下载，只读。 */
+  source?: 'magnet' | 'torrent' | 'none' | 'auto';
   /** 服务端算好的「这个状态下能做哪些操作」。 */
   canPause: boolean;
   canResume: boolean;
@@ -99,6 +109,8 @@ export type JobsResponse = {
   jobs: JobView[];
   running: boolean;
   counts: JobCounts;
+  /** 自动追番（计划任务进程）现在在干什么。 */
+  auto?: AutoStatus;
 };
 
 /* ------------------------------ 后台任务 ------------------------------ */
@@ -353,6 +365,8 @@ export type StatusResponse = {
   message: string;
   planner: string;
   backend: string;
+  /** 'auto' = 自动追番（另一个进程）的下载，只读。 */
+  source?: 'magnet' | 'torrent' | 'none' | 'auto';
   backendLabel: string;
   savePath: string;
   seriesDir: string;

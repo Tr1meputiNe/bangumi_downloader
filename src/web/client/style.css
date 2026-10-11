@@ -931,6 +931,16 @@ input[type='checkbox'] {
   word-break: break-all;
 }
 
+.auto-banner {
+  margin-bottom: 10px;
+  border-left: 3px solid var(--accent-dim);
+  background: rgba(76, 141, 255, 0.06);
+}
+
+.auto-banner.running {
+  border-left-color: var(--ok);
+}
+
 .job-eta {
   font-size: 11px;
   color: var(--dim);

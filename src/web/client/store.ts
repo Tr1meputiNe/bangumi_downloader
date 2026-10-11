@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
-import { api, type JobCounts, type JobView, type StatusResponse, type TaskView } from './api.js';
+import { api, type AutoStatus, type JobCounts, type JobView, type StatusResponse, type TaskView } from './api.js';
 
 /**
  * 全局状态：状态栏、下载任务、后台任务。
@@ -17,6 +17,8 @@ export type ToastKind = 'ok' | 'err' | 'info';
 export type Toast = { id: number; kind: ToastKind; text: string };
 
 export type AppState = {
+  /** 自动追番（另一个进程）的状态。 */
+  auto: AutoStatus | null;
   status: StatusResponse | null;
   jobs: JobView[];
   counts: JobCounts;
@@ -38,6 +40,7 @@ let state: AppState = {
   jobs: [],
   counts: EMPTY_COUNTS,
   jobsRunning: false,
+  auto: null,
   tasks: [],
   tasksRunning: false,
   toasts: [],
@@ -80,6 +83,7 @@ async function tick(): Promise<void> {
       jobs: jobs.jobs,
       counts: jobs.counts,
       jobsRunning: jobs.running,
+      auto: jobs.auto ?? null,
       tasks: tasks.tasks,
       tasksRunning: tasks.running,
       online: true,
