@@ -175,6 +175,16 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
       updated.lastSkipReason = decision.reason;
       saveAutoSchedule(schedulePath, updated);
 
+      /*
+       * 跳过也要写一条 activity：任务列表里能看到「这轮为什么没干活」，
+       * 否则自动追番安静地什么都不做，用户只能去翻日志。
+       */
+      if (options.configPath) {
+        publishActivity(
+          autoSchedulePath(options.configPath),
+          `本轮跳过（${decision.action === 'refresh' ? '只重读计划' : '没到检查时间'}）：${decision.reason}`
+        );
+      }
       return {
         subjects: 0,
         checked: 0,
