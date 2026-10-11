@@ -25,6 +25,7 @@ import {
   autoSchedulePath,
   buildPlanRows,
   effectiveRunning,
+  readActivity,
   describeNextCheck,
   doneKeys,
   loadAutoSchedule,
@@ -523,12 +524,14 @@ function autoStatusView(deps: WebDeps): {
     return { running: false, activity: null, activityAt: null, taskRunning: false, nextCheckText: null };
   }
   const running = effectiveRunning(state);
+  // 活动状态单独存一个文件（计划文件会被整轮覆盖，写进去会被冲掉）
+  const activity = readActivity(autoSchedulePath(deps.configPath));
   const runner = deps.tasks;
   const taskRunning = runner ? runner.list().some((task) => task.status === 'running' && task.kind === 'auto') : false;
   return {
     running: running !== null,
-    activity: state.activity?.text ?? null,
-    activityAt: state.activity?.at ?? null,
+    activity: activity?.text ?? null,
+    activityAt: activity?.at ?? null,
     taskRunning,
     nextCheckText: state.nextCheckAt ? new Date(state.nextCheckAt).toISOString() : null
   };

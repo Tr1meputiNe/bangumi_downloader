@@ -167,11 +167,39 @@ export function clearStaleRunning(path: string): boolean {
   return true;
 }
 
+/**
+ * 「自动追番现在在干什么」的存放位置。
+ *
+ * 刻意**不用**计划文件本身：自动追番在整轮里持有一份 state 副本，
+ * 结束时会整体写回，中间写进去的字段会被冲掉（实测 activity 就是这么丢的）。
+ * 单独一个文件，谁也不覆盖谁。
+ */
+export function activityPath(schedulePath: string): string {
+  return join(dirname(schedulePath), 'auto-activity.json');
+}
+
 /** 记一条「自动追番现在在干什么」（界面上的任务列表会显示）。 */
 export function publishActivity(path: string, text: string): void {
-  const state = loadAutoSchedule(path);
-  state.activity = { text, at: new Date().toISOString() };
-  saveAutoSchedule(path, state);
+  const target = activityPath(path);
+  try {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, `${JSON.stringify({ text, at: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    log.warn(`写活动状态失败：${(error as Error).message}`);
+  }
+}
+
+/** 读回最近一条活动状态（没有就返回 null）。 */
+export function readActivity(schedulePath: string): { text: string; at: string } | null {
+  const target = activityPath(schedulePath);
+  if (!existsSync(target)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(target, 'utf8')) as { text?: unknown; at?: unknown };
+    if (typeof parsed.text !== 'string' || parsed.text === '') return null;
+    return { text: parsed.text, at: typeof parsed.at === 'string' ? parsed.at : '' };
+  } catch {
+    return null;
+  }
 }
 
 /** 下载结束后清掉「正在下载」。 */
