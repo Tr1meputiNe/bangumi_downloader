@@ -575,12 +575,13 @@ describe('下载前查重：磁盘上已经有这一集就别重下', () => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  const makeTree = (files: string[]): string => {
+  // 写「有真实数据」的文件（全零会被当成预分配空壳，那是有意的）
+  const makeTree = (files: string[], filler = 0x41): string => {
     const dir = mkdtempSync(join(tmpdir(), 'dedupe-'));
     dirs.push(dir);
     const anime = join(dir, '番剧', '2026_10');
     mkdirSync(anime, { recursive: true });
-    for (const name of files) writeFileSync(join(anime, name), 'x');
+    for (const name of files) writeFileSync(join(anime, name), Buffer.alloc(512 * 1024, filler));
     return dir;
   };
 
@@ -608,6 +609,21 @@ describe('下载前查重：磁盘上已经有这一集就别重下', () => {
     // 同一部番但集号不同
     expect(
       findEpisodeAlreadyDownloaded({ savePath, seriesDir: '番剧', episode: 3, aliases: ['鐵旅！meet with 鐵道少女'] })
+    ).toBeNull();
+  });
+
+  it('预分配的空壳不算「已经有」——否则那 1% 数据的壳会被当成已下完，永远不再下', async () => {
+    const { findEpisodeAlreadyDownloaded } = await import('../src/core/episodes.js');
+    // 实测：241MB 的 mp4 里真实数据只有 1%（上一次失败留下的预分配壳）
+    const savePath = makeTree(['[ANi] 偵探已經，死了。Season 2 - 01 [1080P].mp4'], 0);
+    expect(
+      findEpisodeAlreadyDownloaded({
+        savePath,
+        seriesDir: '番剧',
+        episode: 1,
+        aliases: ['侦探已经死了。Season 2'],
+        airDate: '2026-10-04'
+      })
     ).toBeNull();
   });
 

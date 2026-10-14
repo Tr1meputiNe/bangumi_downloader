@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { parseReleaseName } from '../anime/parse.js';
 import { monthFolder } from '../util/text.js';
@@ -98,6 +98,62 @@ export function sameShowName(a: string, b: string): boolean {
   return hit / short.length >= 0.7;
 }
 
+/**
+ * 这个文件里「真的有数据」的比例（抽样估算）。
+ *
+ * 为什么必须看：预分配的空壳名义大小和正片一模一样（实测 241MB 的 mp4 里
+ * 真实数据只有 1%）。如果只按文件名判「已经有这一集了」，就会把上一次失败的
+ * 空壳当成已完成，永远不再下这一集 —— 那比重复下载更糟。
+ */
+export function realDataRatio(path: string, samples = 24): number {
+  let size = 0;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return 0;
+  }
+  if (size <= 0) return 0;
+
+  const window = Math.max(1, Math.min(64 * 1024, Math.ceil(size / samples)));
+  const span = Math.max(1, size - window);
+  let fd: number | null = null;
+  let nonzero = 0;
+  let total = 0;
+  try {
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(window);
+    for (let index = 0; index < samples; index += 1) {
+      const offset = Math.floor((span * index) / Math.max(1, samples - 1));
+      const read = readSync(fd, buffer, 0, window, offset);
+      if (read <= 0) continue;
+      total += read;
+      // 只要窗口里有非零字节就算这块有数据（视频里连续 0 很常见，逐字节判断会更准但没必要）
+      for (let i = 0; i < read; i += 1) {
+        if (buffer[i] !== 0) {
+          nonzero += read - i;
+          break;
+        }
+      }
+    }
+  } catch {
+    return 0;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+  return total === 0 ? 0 : nonzero / total;
+}
+
+/**
+ * 抽样判「这个文件算不算真下完了」。
+ *
+ * 阈值取 20%：正常视频抽样命中率很高（视频码流几乎铺满），
+ * 而空壳接近 0%、刚开头的进度也很低。宁可把它当成「还没下完」再下一次，
+ * 也不要把空壳当成已有内容而永远跳过 —— 前者浪费带宽，后者丢内容。
+ */
+export function looksDownloaded(path: string): boolean {
+  return realDataRatio(path) >= 0.2;
+}
+
 /** 目录里已有的这一集的视频文件（只看这一层，跟下载落盘的层级一致）。 */
 export function findEpisodeOnDisk(
   dir: string,
@@ -122,7 +178,10 @@ export function findEpisodeOnDisk(
   for (const name of names) {
     const parsed = parseReleaseName(name);
     if (!parsed.episodes.includes(episode)) continue;
-    if (aliases.some((alias) => sameShowName(alias, name))) return name;
+    if (!aliases.some((alias) => sameShowName(alias, name))) continue;
+    // 空壳不算「已经有」：预分配的文件名义大小是真的，里面却没有数据
+    if (!looksDownloaded(join(dir, name))) continue;
+    return name;
   }
   return null;
 }
