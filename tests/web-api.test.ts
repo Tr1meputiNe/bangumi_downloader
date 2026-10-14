@@ -432,6 +432,7 @@ describe('后台任务接口（核对 / 追番）', () => {
         dryRun: true,
         downloaded: [{ query: 'A 番', episodes: [1], files: 2, completed: true, bytesWritten: 1024 }],
         skipped: [],
+        downloadedSkippedExisting: [],
         finishedAt: new Date().toISOString()
       })) as typeof runAutoTask);
 
@@ -456,6 +457,7 @@ describe('后台任务接口（核对 / 追番）', () => {
         dryRun: false,
         downloaded: [],
         skipped: [],
+        downloadedSkippedExisting: [],
         finishedAt: new Date().toISOString()
       };
     }) as typeof runAutoTask);

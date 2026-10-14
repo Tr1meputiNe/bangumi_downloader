@@ -9,6 +9,8 @@ import { logger } from '../util/log.js';
 import { claimDownload, downloadKeyOf, inflightPath, releaseDownload } from './inflight.js';
 import { searchAndRank } from './search.js';
 import { hasEpisodeMarker, monthFolder, showNameFromTitle } from '../util/text.js';
+import { parseReleaseName } from '../anime/parse.js';
+import { findEpisodeAlreadyDownloaded } from './episodes.js';
 import { probeSeeders } from './viable.js';
 
 const log = logger('dispatch');
@@ -217,6 +219,26 @@ async function downloadWithBuiltinClaimed(
 
   const episodes = input.episodes ?? [];
   const infoHash = magnet ? magnetInfoHash(magnet) : null;
+
+  /*
+   * 查重提示：这一集磁盘上已经有了就说清楚，但不拦 ——
+   * 用户可能特意想要更好的版本（另一个字幕组/更高码率），替他决定反而更烦。
+   */
+  const parsedEpisode = parseReleaseName(input.title).episodes[0] ?? null;
+  const aliases = [showNameFromTitle(input.title) ?? input.title];
+  if (parsedEpisode !== null) {
+    const hit = findEpisodeAlreadyDownloaded({
+      savePath,
+      seriesDir: config.download.seriesDir,
+      episode: parsedEpisode,
+      aliases
+    });
+    if (hit) {
+      hooks.onLog?.(
+        `注意：第 ${parsedEpisode} 集磁盘上已经有了（${hit.file.slice(0, 60)}）—— 仍按你的选择下载`
+      );
+    }
+  }
 
   /*
    * 探活：先问公共 tracker「这个种子有多少做种」，写进任务日志。

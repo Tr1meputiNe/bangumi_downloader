@@ -169,14 +169,28 @@ const COMPACT_PATTERN = /S(\d{1,2})E(\d{1,4})(?![0-9])/gi;
  */
 function maskCombinedSpans(compacted: string): string {
   const chars = [...compacted];
-  for (const match of compacted.matchAll(COMPACT_PATTERN)) {
-    const start = match.index ?? 0;
-    for (let i = start; i < start + match[0].length && i < chars.length; i += 1) {
+  const blank = (start: number, length: number): void => {
+    for (let i = start; i < start + length && i < chars.length; i += 1) {
       if (chars[i] !== '\n') chars[i] = ' ';
     }
-  }
+  };
+  for (const match of compacted.matchAll(COMPACT_PATTERN)) blank(match.index ?? 0, match[0].length);
+
+  /*
+   * 把「季」的写法也屏蔽掉，只留下集号。
+   *
+   * 实测的坑：`[ANi] 偵探已經，死了。Season 2 - 01 […]` 被解析成「第 2 集」——
+   * `Season 2` 里的 2 被当成了集号（当标题里没有 E/Episode 时，压缩规则不生效）。
+   * 这会让「给第 1 集找种」匹配到别的集号，也是重复下载/下错集的一个来源。
+   * 屏蔽只影响集号识别，季度号由 parseSeason 在原始标题上单独算，不受影响。
+   */
+  for (const match of compacted.matchAll(SEASON_MARKER_SPAN)) blank(match.index ?? 0, match[0].length);
   return chars.join('');
 }
+
+/** 「第2季」「Season 2」「2nd Season」「2期」「S2」这类季度写法（不含后面的集号）。 */
+const SEASON_MARKER_SPAN =
+  /(?:第\s*\d{1,2}\s*[季期部]|\b\d{1,2}\s*(?:st|nd|rd|th)\s*season\b|\bseason\s*\d{1,2}\b|\bS\d{1,2}\b(?![Ee]\d))/gi;
 
 /** 从紧凑标记 S02E01 里取出集号。 */
 function collectCombinedCandidates(compacted: string): EpisodeCandidate[] {
@@ -359,7 +373,14 @@ export function parseReleaseName(rawName: string): ParsedReleaseName {
     ranges[0] ??
     null;
 
-  const batchHint = /合集|全集|Complete|Batch|Season\s*Pack|全話|全话|部全|\d+\s*[-~–—～]\s*\d+/i.test(text);
+  /*
+   * 「像合集吗」。数字区间那一条必须在**屏蔽过的**文本上判断：
+   * 否则 `Season 2 - 01` 里的「2 - 01」会被当成集号区间，
+   * 一个单集发布被标成 batch（实测就是这样把 [ANi] 的单集当成合集，
+   * 进而按集号匹配时认错集）。
+   */
+  const batchHint =
+    /合集|全集|Complete|Batch|Season\s*Pack|全話|全话|部全/i.test(text) || /\d+\s*[-~–—～]\s*\d+/.test(masked);
 
   if (range) {
     episodeFrom = range.from;

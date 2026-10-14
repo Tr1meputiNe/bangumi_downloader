@@ -568,3 +568,54 @@ describe('新番按月归档（番剧/2026_10/xxx.mkv）', () => {
     expect(hasEpisodeMarker('[Airota&VCB-Studio] Gekijouban Hibike! Euphonium Chikai no Finale [Ma10p_1080p]')).toBe(false);
   });
 });
+
+describe('下载前查重：磁盘上已经有这一集就别重下', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const makeTree = (files: string[]): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'dedupe-'));
+    dirs.push(dir);
+    const anime = join(dir, '番剧', '2026_10');
+    mkdirSync(anime, { recursive: true });
+    for (const name of files) writeFileSync(join(anime, name), 'x');
+    return dir;
+  };
+
+  it('认得出「同一部番的同一集」——繁简/译名不同也算', async () => {
+    const { findEpisodeAlreadyDownloaded } = await import('../src/core/episodes.js');
+    // 实测现场：手动下的是繁体 [ANi] 版，自动追番又下了一份 [Dynamis One]
+    const savePath = makeTree(['[ANi] 偵探已經，死了。Season 2 - 01 [1080P][Baha].mp4']);
+    const hit = findEpisodeAlreadyDownloaded({
+      savePath,
+      seriesDir: '番剧',
+      episode: 1,
+      aliases: ['侦探已经死了。Season 2', 'Tantei wa Mou, Shindeiru. Season 2'],
+      airDate: '2026-10-04'
+    });
+    expect(hit?.file).toContain('偵探已經');
+  });
+
+  it('别的番、别的集不误判', async () => {
+    const { findEpisodeAlreadyDownloaded } = await import('../src/core/episodes.js');
+    const savePath = makeTree(['[ANi] 鐵旅！meet with 鐵道少女 - 02 [1080P].mp4']);
+    // 同一集号但明显是另一部番
+    expect(
+      findEpisodeAlreadyDownloaded({ savePath, seriesDir: '番剧', episode: 2, aliases: ['侦探已经死了。Season 2'] })
+    ).toBeNull();
+    // 同一部番但集号不同
+    expect(
+      findEpisodeAlreadyDownloaded({ savePath, seriesDir: '番剧', episode: 3, aliases: ['鐵旅！meet with 鐵道少女'] })
+    ).toBeNull();
+  });
+
+  it('名字相同时才算同一部番（避免「某番」匹配到「某番外」这类误伤）', async () => {
+    const { sameShowName } = await import('../src/core/episodes.js');
+    expect(sameShowName('侦探已经死了。Season 2', '偵探已經，死了。Season 2')).toBe(true);
+    expect(sameShowName('鐵旅！meet with 鐵道少女', '偵探已經，死了。Season 2')).toBe(false);
+    // 短名字不做宽松匹配
+    expect(sameShowName('A', 'AB')).toBe(false);
+  });
+});

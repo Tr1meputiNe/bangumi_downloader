@@ -2,6 +2,7 @@ import type { AppConfig } from '../config.js';
 import { searchAndRank } from './search.js';
 import type { ScoredCandidate } from '../anime/rank.js';
 import { downloadUntilComplete } from './retry.js';
+import { findEpisodeAlreadyDownloaded } from './episodes.js';
 import {
   isEntryComplete,
   loadWatchlist,
@@ -110,6 +111,8 @@ export type AutoReport = {
   source: 'planner' | 'watchlist';
   downloaded: Array<{ query: string; episodes: number[]; files: number; completed: boolean; bytesWritten: number }>;
   skipped: Array<{ query: string; reason: string }>;
+  /** 磁盘上已经有、因此跳过的集（下载前查重命中）。 */
+  downloadedSkippedExisting: Array<{ query: string; episode: number; file: string }>;
   /** 因为「还没到播出的检查时间」整轮没干活。 */
   skippedBySchedule?: boolean;
   /** 没干活的那一轮具体做了什么：只刷新了计划（refresh）还是连请求都没发（skip）。 */
@@ -126,7 +129,14 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
   const savePath = config.download.savePath || config.qbittorrent.savePath;
   if (!savePath) {
     log.error('没有配置下载目录：请在 config.json 里设置 download.savePath');
-    return { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'watchlist' };
+    return {
+      subjects: 0,
+      checked: 0,
+      downloaded: [],
+      skipped: [],
+      downloadedSkippedExisting: [],
+      source: 'watchlist'
+    };
   }
 
   const now = options.now ?? new Date();
@@ -165,7 +175,11 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
       const updated = state ?? loadAutoSchedule(schedulePath, now);
       let taskSync: SyncResult | undefined;
       if (decision.action === 'refresh') {
-        const plan = await computePlan(options, { subjects: 0, checked: 0, downloaded: [], skipped: [], source: 'planner' }, now);
+        const plan = await computePlan(
+          options,
+          { subjects: 0, checked: 0, downloaded: [], skipped: [], downloadedSkippedExisting: [], source: 'planner' },
+          now
+        );
         const previousTriggers = updated.triggers;
         applyPlan(updated, plan, now);
         log.info(`计划已刷新，下次检查：${formatClock(plan.nextCheckAt)} —— ${plan.reason}`);
@@ -190,6 +204,7 @@ export async function runAuto(options: AutoOptions): Promise<AutoReport> {
         checked: 0,
         downloaded: [],
         skipped: [],
+        downloadedSkippedExisting: [],
         source: 'planner',
         skippedBySchedule: true,
         mode: decision.action,
@@ -389,7 +404,47 @@ async function runFromPlanner(
     }
   }
 
-  const report: AutoReport = { subjects: gaps.length, checked: 0, downloaded: [], skipped: [], source: 'planner' };
+  const report: AutoReport = {
+    subjects: gaps.length,
+    checked: 0,
+    downloaded: [],
+    skipped: [],
+    downloadedSkippedExisting: [],
+    source: 'planner'
+  };
+
+  /*
+   * 下载前查重：把「磁盘上其实已经有了」的集从待下清单里去掉。
+   *
+   * 实测的坑：用户手动下过《侦探已经死了 S2》第 1 集（[ANi] 版本），
+   * 自动追番不知道，又找了一条 [Dynamis One] 重下了一遍 —— 同一集两份，占双倍空间。
+   * 判断依据是**磁盘上的文件名**，而不是「谁下过」的账本：这样跨工具、跨来源都能覆盖。
+   */
+  if (!options.dryRun) {
+    for (const gap of gaps) {
+      const aliases = gap.queries.length > 0 ? gap.queries : [displayName(gap.subject)];
+      const already: number[] = [];
+      for (const episode of gap.missingEpisodes) {
+        const hit = findEpisodeAlreadyDownloaded({
+          savePath,
+          seriesDir: config.download.seriesDir,
+          episode,
+          aliases,
+          airDate: gap.episodeMeta.get(episode)?.airdate ?? null
+        });
+        if (!hit) continue;
+        already.push(episode);
+        log.info(`《${displayName(gap.subject)}》第 ${episode} 集磁盘上已经有了（${hit.file.slice(0, 60)}），跳过`);
+        report.downloadedSkippedExisting.push({ query: displayName(gap.subject), episode, file: hit.file });
+      }
+      if (already.length > 0) {
+        gap.missingEpisodes = gap.missingEpisodes.filter((episode) => !already.includes(episode));
+      }
+    }
+    for (let index = gaps.length - 1; index >= 0; index -= 1) {
+      if ((gaps[index]?.missingEpisodes.length ?? 0) === 0) gaps.splice(index, 1);
+    }
+  }
   if (gaps.length === 0) {
     log.info('Planner 里没有「已播出但没看」的集数');
     return report;
@@ -751,7 +806,14 @@ async function runFromWatchlist(options: AutoOptions, savePath: string): Promise
   const path = options.watchlistFile ?? watchlistPath(options.configPath);
   const list = loadWatchlist(path);
 
-  const report: AutoReport = { subjects: list.entries.length, checked: 0, downloaded: [], skipped: [], source: 'watchlist' };
+  const report: AutoReport = {
+    subjects: list.entries.length,
+    checked: 0,
+    downloaded: [],
+    skipped: [],
+    downloadedSkippedExisting: [],
+    source: 'watchlist'
+  };
 
   if (list.entries.length === 0) {
     log.warn(`追番清单是空的（${path}）。把要追的番名填进 entries 即可，例如：`);
