@@ -345,7 +345,16 @@ export class TorrentDownloader extends EventEmitter {
 
     try {
       mkdirSync(dir, { recursive: true });
-      const marker = join(dir, '⚠ 还没下完，现在播放会失败.txt');
+      /*
+       * 标记文件名里带上这条发布的名字。
+       *
+       * 以前是固定名，一个目录只有一个标记 —— 而新番现在按月归档，
+       * 同一个目录里会有好几条下载在跑（用户报的「重复下载」现场就是两条
+       * 同一集的下载），它们会互相覆盖/删除对方写的那份标记：
+       * 一条下完就把标记删了，另一条其实还没下完，用户打开目录却看不到任何提示。
+       */
+      const tag = (this.#meta?.name ?? '下载').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+      const marker = join(dir, `⚠ 还没下完，现在播放会失败（${tag}）.txt`);
       const percent = ((storage.verified.size / Math.max(1, storage.wantedPieces().length)) * 100).toFixed(1);
       writeFileSync(
         marker,
